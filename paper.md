@@ -101,7 +101,7 @@ To calculate the asymmetries in dual force platform systems, the phases were fir
 
 # 4. Availability
 
-The code is available on [Zenodo](https://doi.org/10.5281/zenodo.17167260). The tool is distributed under the MIT License, allowing for free use, modification, and redistribution. For further details on metric calculations and interactive interface development, refer to the script comments. Instructions for usage are provided in the README file.
+The code is available on [Zenodo](https://doi.org/10.5281/zenodo.17167260). The tool is distributed under the MIT License, allowing for free use, modification, and redistribution. Instructions for usage are provided in the README file.
 
 # 5. Acknowledgements
 
