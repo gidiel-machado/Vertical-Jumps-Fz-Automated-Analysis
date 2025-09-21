@@ -107,4 +107,7 @@ The code is available on [Zenodo](https://doi.org/10.5281/zenodo.17167260). The 
 
 The author LGM would like to thank CNPq – Conselho Nacional de Desenvolvimento Científico e Tecnológico for the scholarship, as well as Felipe Gidiel-Machado and Germano Buzzato de Souza for helping in the development of the scripts presented in this study through their discussions.
 
-# 6. References
+# 6. Supplementary Materials
+More detailed information about the definition of each jump phase and the references used for the calculation of each metric are available on [GitHub](https://github.com/gidiel-machado/Vertical-Jumps-Fz-Automated-Analysis) (suptables).
+
+# 7. References
