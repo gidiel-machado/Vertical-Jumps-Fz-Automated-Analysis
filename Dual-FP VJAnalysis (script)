@@ -1,0 +1,1997 @@
+"""Script to analyze vertical-force (Fz) during jumps on dual force platforms (FP) system
+Calculates kinetic and kinematic metrics from Fz data in txt-files
+Last updated on May 26, 2025"""
+
+# Required libraries:
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import matplotlib.patches as mpatches
+from matplotlib import rcParams
+from scipy import signal
+
+
+### 1. Interface
+def setup_window():
+    window = tk.Tk()  # Initializes a window
+    window.withdraw()  # Hides the main window
+    screen_width = window.winfo_screenwidth()  # Measures the screen width  # noqa
+    screen_height = window.winfo_screenheight()  # Measures the screen height  # noqa
+    window_width = int(screen_width * 0.80)  # Calculates 80% of the screen width  # noqa
+    window_height = int(screen_height * 0.80)  # Calculate 80% of the screen height  # noqa
+    x_pos = (screen_width - window_width) // 2  # Adjusts the horizontal window position  # noqa
+    y_pos = (screen_height - window_height) // 6  # Adjusts the vertical window position  # noqa
+    rcParams['font.weight'] = 'bold'  # Sets bold letters as default
+    return screen_width, screen_height, window_width, window_height, x_pos, y_pos
+
+
+def close_on_enter(event):
+    if event.key == "enter":  # If the enter key is pressed...
+        plt.close()  # Closes the plot and advances
+
+
+def select_file():
+    if not messagebox.askokcancel(" ", "Select the Fz data"):
+        sys.exit(0)  # Exits the script if click cancel or close the window
+    file_select = filedialog.askopenfilename(title=" ", filetypes=[(".txt", "*.txt")])  # Selection window
+    if file_select != '':  # If a file has been selected...
+        return file_select, os.path.splitext(os.path.basename(file_select))[0]  # File location and name
+    else:  # If the operation is canceled...
+        sys.exit(0)  # Exits the script
+
+
+def insert_sampling_frequency():
+    sample_frequency = simpledialog.askinteger(" ", "Enter the sampling frequency (Hz):", initialvalue=1000)
+    if sample_frequency is None:  # If the operation is canceled...
+        sys.exit(0)  # Exits the script
+    return sample_frequency  # If advances, returns the sampling frequency
+
+
+### 2. Pre-processing
+def read_data(input_file, samp_freq, window_width, window_height, x_pos, y_pos):  # noqa
+    """Reads the selected file, creates the time list and provides filtering and cut option"""
+    try:
+        with open(input_file, 'r') as archive:  # Reads the data
+            lines = archive.readlines()  # Reads all lines from the file and stores them in a list
+    except Exception as e:  # If any unexpected error occurs...
+        messagebox.showerror(" ", f"Unexpected error:\n{e}")  # Error message
+        sys.exit(1)  # Exits the script
+
+    for idx, line in enumerate(lines, start=1):  # Verifies if the data contains two columns
+        stripped_line = line.strip()  # Removes blank spaces
+        if not stripped_line:
+            continue
+        values = stripped_line.split()  # Splits columns using whitespace as the delimiter
+        if len(values) != 2:
+            messagebox.showerror("  ", f"The expected format is two Fz-columns")  # Error message
+            sys.exit(1)  # Exits the script
+
+    fz1_list = []  # Initializes an empty list to hold numeric data from the FP1
+    fz2_list = []  # Initializes an empty list to hold numeric data from the FP2
+
+    for line in lines:
+        stripped_line = line.strip()  # Removes blank spaces
+        if not stripped_line:
+            continue
+        values = stripped_line.split()
+        try:
+            vfz1 = float(values[0])  # Attempt to convert the stripped Fz1 line into a float
+            vfz2 = float(values[1])  # Attempt to convert the stripped Fz2 line into a float
+            fz1_list.append(vfz1)  # If successful, append the number to the Fz1-list
+            fz2_list.append(vfz2)  # If successful, append the number to the Fz2-list
+        except ValueError:
+            continue  # Skip that line and continue to the next one
+
+    fzs_list = [f1 + f2 for f1, f2 in zip(fz1_list, fz2_list)]  # Creates the Fz-sum-list
+    time_list = [(i + 1) / samp_freq for i in range(len(fzs_list))]  # Creates a time list for the data
+
+    # Asks the user if it is necessary to filter the data
+    filter_choice = (messagebox.askyesno(" ", "Filter the Fz data?\n"
+                                              "(Harry et al., 2022. J Strength Cond Res, 36(5): 1459-1467)"))
+    if filter_choice:  # If the option to filter data is chosen...
+        order = 2  # Results in 4th order after dual-pass
+        cutoff = 50  # Cut-off frequency (Hz)
+        b, a = signal.butter(order, cutoff, btype='low', fs=samp_freq)  # Low-pass Butterworth filter (# noqa)
+        fz1_list = signal.filtfilt(b, a, fz1_list).tolist()  # noqa
+        fz2_list = signal.filtfilt(b, a, fz2_list).tolist()  # noqa
+        fzs_list = signal.filtfilt(b, a, fzs_list).tolist()  # noqa
+
+    # Rounds values to 3 decimals
+    fz1_list = [round(v, 3) for v in fz1_list]
+    fz2_list = [round(v, 3) for v in fz2_list]
+    fzs_list = [round(v, 3) for v in fzs_list]
+
+    class DataCutter:  # Cutting function
+        def __init__(self, ax, time_list, fz1_list, fz2_list, fzs_list):  # noqa
+            self.ax = ax
+            self.time_list = time_list
+            self.fz1_list = fz1_list
+            self.fz2_list = fz2_list
+            self.fzs_list = fzs_list
+            self.clicks = []
+            self.cut_data = None
+            # Dynamic reference cut line
+            self.ref_line = self.ax.axvline(0, color='#000000', linestyle='--', alpha=0.5, visible=False)
+            self.ax.figure.canvas.mpl_connect('button_press_event', self.on_click)
+            self.ax.figure.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+
+        def on_mouse_move(self, event):  # Update reference line position with mouse movement
+            if event.inaxes == self.ax and len(self.clicks) < 2:
+                self.ref_line.set_xdata([event.xdata, event.xdata])
+                self.ref_line.set_visible(True)
+                self.ax.figure.canvas.draw_idle()
+            else:
+                self.ref_line.set_visible(False)
+                self.ax.figure.canvas.draw_idle()
+
+        def on_click(self, event):
+            if event.inaxes != self.ax:
+                return
+            if len(self.clicks) < 2:
+                self.clicks.append(event.xdata)
+                self.ax.axvline(event.xdata, color='#FF0000', linestyle='--')
+                self.ax.figure.canvas.draw()
+                if len(self.clicks) == 2:
+                    self.cut_data = self.perform_cut()
+                    plt.close(self.ax.figure)
+
+        def perform_cut(self):
+            start, end = sorted(self.clicks)
+            indices = [i for i, t in enumerate(self.time_list) if start <= t <= end]
+            if not indices:
+                return None
+
+            start_time = self.time_list[indices[0]]
+            time_cut = [t - start_time for t in [self.time_list[i] for i in indices]]
+
+            return {
+                'time': time_cut,
+                'fz1': [self.fz1_list[i] for i in indices],
+                'fz2': [self.fz2_list[i] for i in indices],
+                'fzsum': [self.fzs_list[i] for i in indices]}
+
+    def plot_fz(time, fzsum, fz1, fz2, window_width, window_height, x_pos, y_pos):  # noqa
+        fig, ax = plt.subplots()  # noqa
+        fig.canvas.manager.set_window_title(" ")
+        fig_manager = plt.get_current_fig_manager()  # noqa
+        fig_manager.window.geometry(f"{window_width}x{window_height}+{x_pos}+{y_pos}")  # noqa
+
+        ax.set_xlabel('Seconds', fontsize=20, fontweight='bold')
+        ax.set_ylabel('Vertical-Force (N)', fontsize=20, fontweight='bold')
+        ax.plot(time, fzsum, color='#000000', linewidth=2, zorder=2)
+        ax.tick_params(axis='y', labelcolor='#000000')
+        ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))
+        ax.grid(visible=True)
+        ax.plot(time, fz1, color='#FF0000', linewidth=1, zorder=1, label='FP1-Fz (N)')
+        ax.plot(time, fz2, color='#00FF00', linewidth=1, zorder=1, label='FP2-Fz (N)')
+
+        return fig, ax
+
+    def verification_plot(time, fzsum, fz1, fz2, window_width, window_height, x_pos, y_pos):  # noqa
+        fig, ax = plot_fz(time, fzsum, fz1, fz2, window_width, window_height, x_pos, y_pos)  # noqa
+        fig.canvas.mpl_connect('key_press_event', close_on_enter)  # noqa
+        plt.show()
+
+        result = messagebox.askyesno(" ", "Do you want to cut the Fz data?")
+
+        if result:
+            messagebox.showinfo(" ", ">>> DELIMIT THE CUTTING INTERVAL WITH TWO CLICKS <<<\n"
+                                     "ATTENTION: 1 sec of stable Fz before the CMJ-start is required\n"
+                                     "In the SJ/DJ 1 sec of stable Fz after the jump-end is required")
+
+            fig, ax = plot_fz(time, fzsum, fz1, fz2, window_width, window_height, x_pos, y_pos)  # noqa
+            cutter = DataCutter(ax, time, fz1, fz2, fzsum)
+            fig.canvas.mpl_connect('key_press_event', close_on_enter)  # noqa
+            plt.show()
+
+            if cutter.cut_data:
+                return (
+                    cutter.cut_data['time'],
+                    cutter.cut_data['fzsum'],
+                    cutter.cut_data['fz1'],
+                    cutter.cut_data['fz2'])
+            else:
+                return time, fzsum, fz1, fz2
+        else:
+            return time, fzsum, fz1, fz2
+
+    time, fzs_list, fz1_list, fz2_list = verification_plot(
+        time_list, fzs_list, fz1_list, fz2_list, window_width, window_height, x_pos, y_pos)
+
+    return time, fzs_list, fz1_list, fz2_list
+
+
+def cmj():
+    input_file, input_file_name = select_file()
+    samp_freq = insert_sampling_frequency()
+    time, fzsum, fz1, fz2 = read_data(input_file, samp_freq, window_width, window_height, x_pos, y_pos)
+
+    ## Time adjustments
+    time_i = 1 / samp_freq  # Time intervals based on the sampling frequency
+    thirty_ms = int(samp_freq * 0.03)  # Index equivalent to 30 milliseconds (ms)
+
+    ## Weighing adjustments
+    weight = sum(fzsum[:samp_freq]) / len(fzsum[:samp_freq])  # Weight (N) in the 1st sec (1st sec mean Fz)
+    mass = weight / 9.807  # Weight to mass (kg)
+    five_sd = np.std(fzsum[:samp_freq]) * 5  # SDx5 in the 1st sec
+
+    ## Includes all errors in a single string
+    errors = ValueError, IndexError, TypeError, StopIteration, KeyError, AttributeError, ZeroDivisionError, RuntimeError
+
+    ### 3. Data processing:
+    def temporary_start():
+        """Identifies the temporary CMJ-start"""
+        try:
+            for i, value in enumerate(fzsum):  # Searches the Fz-list
+                if value > (weight + five_sd) or value < (weight - five_sd):  # Searches for an alteration in Fz
+                    return i  # Returns the index of the 1st data that exceeds the threshold
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"CMJ-Start\n"
+                                      f"Ensure that there is at least 1 sec of stable-Fz before the CMJ-start")
+            sys.exit(1)  # Exits the script
+
+    temporary_unl_start = temporary_start()  # Temporary CMJ-start-index
+
+    def search_takeoff():
+        """Identify the temporary takeoff"""
+        try:  # 500 ms after unload-start to avoid participants who reach 20 N during unload
+            to_interval = temporary_unl_start + (samp_freq // 2)
+            for i, value in enumerate(fzsum[to_interval:], start=to_interval):  # Searches the Fz-list
+                if value < 20:  # Searches for the 1st value < 20 N
+                    return i  # Returns the temporary takeoff index
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"Takeoff")
+            sys.exit(1)  # Exits the script
+
+    temporary_to = search_takeoff()  # Temporary takeoff index
+
+    try:  # Searches for values > 20 N after temporary_to and returns the index of the first (minimum) value > 20 N
+        temporary_ld = min((i for i, value in enumerate(fzsum) if i >
+                            temporary_to and value > 20), key=lambda x: (fzsum[x], x))
+    except errors:
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Landing")
+        sys.exit(1)  # Exits the script
+
+    ## *Important: in the next calculation, the first 30 ms of the temporary_to index will be disregarded
+    ## 30 ms prior to the temporary_ld index will also be disregarded
+    ## The remaining interval only accounts for Fz during flight (unloaded FP)
+
+    # During the flight, the maximum (max) absolute value of Fz will serve to identify the max FP noise
+    max_noise = abs(max(fzsum[temporary_to + thirty_ms: temporary_ld - thirty_ms], key=abs))
+
+    # Searches for a more precise index than 20 N to establish takeoff
+    takeoff = None
+    for i in range(temporary_to, len(fzsum)):
+        if fzsum[i] > max_noise:
+            takeoff = i  # Searches for the last value > max noise after temporary_to
+        else:
+            break  # Break the loop when the condition is no longer met
+    if takeoff is None:
+        takeoff = temporary_to  # If there is no valid index: return temporary_to (20 N)
+
+    # Searches for a more precise index than 20 N to establish landing
+    landing = None
+    for i in range(takeoff + thirty_ms, len(fzsum)):
+        if fzsum[i] > max_noise:
+            landing = i  # Searches for the last value > max noise after takeoff
+        else:
+            break  # Break the loop when the condition is no longer met
+    if landing is None:
+        landing = temporary_ld  # If there is no valid index: return temporary_ld (20 N)
+
+    def unloading_start():
+        # This function will serve to identify the real CMJ-start, beginning the search 2 sec before the flight time
+        # Preventing prior noise from being mistakenly identified as the CMJ-start
+        # If there are not 2 seconds before takeoff, the search starts at index 0
+        start_index = max(0, takeoff - samp_freq * 2)  # Marks the index equivalent to 2 seconds before flight
+        for i, value in enumerate(fzsum[start_index:], start=start_index):  # Searches the Fz-list
+            if value > (weight + five_sd) or value < (weight - five_sd):  # Searches for an alteration in Fz = SDx5
+                return i  # Returns the index of the 1st data that exceeds the threshold
+
+    unload_start = unloading_start()  # Unloading-index (CMJ-start)
+    int_start = unload_start - thirty_ms  # Defines a window of 30 ms prior to the CMJ-start
+
+    def zero_fz_noise():
+        """Zeroes the Fz values in takeoff-landing interval"""
+        if takeoff < landing and 0 <= takeoff < len(fzsum) and 0 <= landing < len(fzsum):
+            for i in range(takeoff, landing):
+                fzsum[i] = 0
+        return fzsum  # Returns the Fz-zeroed-list
+
+    fzsum = zero_fz_noise()  # Fz-zeroed-list (N)
+
+    def net_force():
+        net_fz_list = [f - weight for f in fzsum]  # Subtracts the weight from the Fz-list for each data point
+        net_fz1_list = [f - (weight / 2) for f in fz1]  # Subtracts half of the weight from the Fz1 for each data point
+        net_fz2_list = [f - (weight / 2) for f in fz2]  # Subtracts half of the weight from the Fz2 for each data point
+        return net_fz_list, net_fz1_list, net_fz2_list  # Returns the net-Fz-lists
+
+    net_fz, net_fz1, net_fz2 = net_force()  # Net-Fz-lists (N)
+
+    def net_impulse():
+        impulse_list = [0]
+        impulse_list_fz1 = [0]
+        impulse_list_fz2 = [0]
+        for i in range(1, len(net_fz)):  # Searches the net-Fz-list
+            mean_value = (net_fz[i - 1] + net_fz[i]) / 2  # Calculates the mean between two consecutive Fz intervals
+            impulse_list.append(mean_value * time_i)  # Multiply the mean Fz by the time intervals
+        for i in range(1, len(net_fz1)):
+            mean_value = (net_fz1[i - 1] + net_fz1[i]) / 2
+            impulse_list_fz1.append(mean_value * time_i)
+        for i in range(1, len(net_fz2)):
+            mean_value = (net_fz2[i - 1] + net_fz2[i]) / 2
+            impulse_list_fz2.append(mean_value * time_i)
+        return impulse_list, impulse_list_fz1, impulse_list_fz2  # Returns the net-impulse-lists
+
+    imp, imp1, imp2 = net_impulse()  # Net-impulse-lists (N*s)
+
+    def acceleration():
+        acc_list = [f / mass for f in net_fz]  # Divides the net-Fz by the mass for each data point
+        return acc_list  # Returns the acceleration-list
+
+    acc = acceleration()  # Acceleration-list (m/s^2)
+
+    def velocity():
+        """Calculates the cumulative velocity (1st integration)"""
+        vel_list = [0] * int_start  # List with value 0 up to 30 ms before the CMJ-start
+        for i in range(int_start, len(acc)):  # Searches the acceleration-list
+            # Integrates velocity over time (trapezoidal rule) from 30 ms before the CMJ-start
+            vel_list.append(vel_list[-1] + acc[i] * time_i)
+        return vel_list  # Returns the velocity-list
+
+    vel = velocity()  # Velocity-list (m/s)
+
+    def displacement():
+        """Calculates the center of mass displacement (2nd integration)"""
+        disp_list = [0]  # Initializes the displacement-list with 0
+        for i in range(1, len(vel)):  # Searches the velocity-list
+            disp_list.append(disp_list[-1] + vel[i] * time_i)  # Integrates displacement over time (trapezoidal rule)
+        return disp_list  # Returns the displacement-list
+
+    disp = displacement()  # Displacement-list (m)
+
+    def power():
+        pwr_list = [0] * int_start  # List with value 0 up to 30 ms before the CMJ-start
+        for i in range(int_start, len(fzsum)):  # Searches the Fz-list
+            pwr_list.append(fzsum[i] * vel[i])  # Multiply the force by velocity for each data point
+        return pwr_list  # Returns the power-list
+
+    pwr = power()  # Power-list (W)
+
+    try:
+        peak_fz = fzsum.index(max(fzsum[:takeoff]))  # Peak-Fz (downward or upward)
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-Fz")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_pwr = pwr.index(max(pwr[unload_start:landing]))  # Peak-power
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-power")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        unl_end = fzsum.index(min(fzsum[unload_start:peak_fz]))  # Unloading-end / Yielding-phase-start
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Unloading-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        yld_end = vel.index(min(vel[unl_end:peak_fz]))  # Yielding-end / Braking-phase-start
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Yielding-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        brk_end = next(i for i in range(yld_end, takeoff) if vel[i] >= 0)  # Braking-end / Upward-phase-start
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Braking-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_brk = fzsum.index(max(fzsum[yld_end:brk_end]))  # Braking-Fz-peak
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Braking-Fz-peak")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        cm_disp = disp.index(min(disp[unload_start:takeoff]))  # Countermovement-min-displacement
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Countermovement-minimum-displacement")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_disp = disp.index(max(disp[takeoff:landing]))  # Peak-displacement
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-displacement")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_vel_upw = vel.index(max(vel[brk_end:takeoff]))  # Peak-upward-velocity
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-upward-velocity")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_land = fzsum.index(max(fzsum[takeoff:]))  # Landing-peak-Fz / Marks loading-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Loading-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:  # Searches the fz after peak_land to find the first valley:
+        att_end = next(
+            i for i in range(peak_land + 1, len(fzsum)) if
+            fzsum[i] < fzsum[i - 1] and fzsum[i] < fzsum[i + 1])  # Attenuation-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Attenuation-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:  # Searches the velocity after attenuation-end to find the moment when the value crosses 0
+        zero_vel = next(
+            i - 1 if abs(vel[i - 1]) <= abs(vel[i]) else i
+            for i in range(att_end + 1, len(vel))
+            if vel[i - 1] < 0 <= vel[i])  # Control-phase-end (speed 0 after Attenuation-phase-end)
+        # Next exception handles the fact that 3% of the participants in a previous study didn't have a control phase
+    except StopIteration:
+        zero_vel = att_end + 1  # If not found, returns the index following attenuation-phase-end
+
+    ### 4. Metrics calculation:
+    ## Time (sec) of the CMJ-phases:
+    unl_time = time[unl_end] - time[unload_start]  # Downward-unloading-phase
+    yld_time = time[yld_end] - time[unl_end]  # Downward-yielding-phase
+    brk_time = time[brk_end] - time[yld_end]  # Downward-braking-phase
+    upw_time = time[takeoff] - time[brk_end]  # Upward-phase
+    flight_time = time[landing] - time[takeoff]  # Flight
+    load_time = time[peak_land] - time[landing]  # Landing-loading-phase
+    att_time = time[att_end] - time[peak_land]  # Landing-attenuation-phase
+    cont_time = time[zero_vel] - time[att_end]  # Landing-control-phase
+
+    # The calculations below take the unloading as the starting point for calculating the time
+    time_to_pf = time[peak_fz] - time[unload_start]  # Time to peak-Fz
+    time_to_pp = time[peak_pwr] - time[unload_start]  # Time to peak-power
+    time_to_pv = time[peak_vel_upw] - time[unload_start]  # Time to peak-upward-velocity
+    time_to_to = time[takeoff] - time[unload_start]  # Time to takeoff
+
+    ## Vertical force metrics (N):
+    mean_upw_fz = sum(fzsum[brk_end:takeoff]) / len(fzsum[brk_end:takeoff])  # Mean-Fz-upward
+    peak_cmj_fz = fzsum[peak_fz]  # Peak-Fz (according to the jump-strategy, it can be the same as braking-peak)
+    mean_brk_fz = sum(fzsum[yld_end:brk_end]) / len(fzsum[yld_end:brk_end])  # Mean-Fz-braking
+    peak_brk_fz = fzsum[peak_brk]  # Braking-peak
+    mean_load_fz = sum(fzsum[landing:peak_land]) / len(fzsum[landing:peak_land])  # Mean-Fz-loading
+    peak_load_fz = fzsum[peak_land]  # Loading-peak
+    mean_att_fz = sum(fzsum[peak_land:att_end]) / len(fzsum[peak_land:att_end])  # Mean-Fz-attenuation
+    mean_cont_fz = sum(fzsum[att_end:zero_vel]) / len(fzsum[att_end:zero_vel])  # Mean-Fz-control
+    amortization = fzsum[zero_vel]  # Amortization (Fz at 0 velocity)
+    peak_pwr_fz = fzsum[peak_pwr]  # Fz at peak-power
+
+    ## Individual Fz data to calculate asymmetry:
+    mean_upw_fz1 = sum(fz1[brk_end:takeoff]) / len(fz1[brk_end:takeoff])
+    peak_cmj_fz1 = fz1[peak_fz]
+    mean_brk_fz1 = sum(fz1[yld_end:brk_end]) / len(fz1[yld_end:brk_end])
+    peak_brk_fz1 = fz1[peak_brk]
+    mean_load_fz1 = sum(fz1[landing:peak_land]) / len(fz1[landing:peak_land])
+    peak_load_fz1 = fz1[peak_land]
+    mean_att_fz1 = sum(fz1[peak_land:att_end]) / len(fz1[peak_land:att_end])
+    mean_cont_fz1 = sum(fz1[att_end:zero_vel]) / len(fz1[att_end:zero_vel])
+    amortization1 = fz1[zero_vel]
+
+    mean_upw_fz2 = sum(fz2[brk_end:takeoff]) / len(fz2[brk_end:takeoff])
+    peak_cmj_fz2 = fz2[peak_fz]
+    mean_brk_fz2 = sum(fz2[yld_end:brk_end]) / len(fz2[yld_end:brk_end])
+    peak_brk_fz2 = fz2[peak_brk]
+    mean_load_fz2 = sum(fz2[landing:peak_land]) / len(fz2[landing:peak_land])
+    peak_load_fz2 = fz2[peak_land]
+    mean_att_fz2 = sum(fz2[peak_land:att_end]) / len(fz2[peak_land:att_end])
+    mean_cont_fz2 = sum(fz2[att_end:zero_vel]) / len(fz2[att_end:zero_vel])
+    amortization2 = fz2[zero_vel]
+
+    ## Impulse metrics (N*s):
+    brk_imp_ns = sum(imp[yld_end:brk_end])  # Braking-impulse
+    upw_imp_ns = sum(imp[brk_end:takeoff])  # Upward-impulse
+    load_imp_ns = sum(imp[landing:peak_land])  # Loading-impulse
+    att_imp_ns = sum(imp[peak_land:att_end])  # Attenuation-impulse
+    cont_imp_ns = sum(imp[att_end:zero_vel])  # Control-impulse
+
+    ## Individual Impulse data to calculate asymmetry:
+    brk_imp_fz1 = sum(imp1[yld_end:brk_end])
+    upw_imp_fz1 = sum(imp1[brk_end:takeoff])
+    load_imp_fz1 = sum(imp1[landing:peak_land])
+    att_imp_fz1 = sum(imp1[peak_land:att_end])
+    cont_imp_fz1 = sum(imp1[att_end:zero_vel])
+
+    brk_imp_fz2 = sum(imp2[yld_end:brk_end])
+    upw_imp_fz2 = sum(imp2[brk_end:takeoff])
+    load_imp_fz2 = sum(imp2[landing:peak_land])
+    att_imp_fz2 = sum(imp2[peak_land:att_end])
+    cont_imp_fz2 = sum(imp2[att_end:zero_vel])
+
+    ## Velocity metrics (m/s):
+    peak_vel_upw = vel[peak_vel_upw]  # Peak-upward-velocity
+    peak_vel_dwn = vel[yld_end]  # Peak-downward-velocity
+    peak_pwr_vel = vel[peak_pwr]  # Velocity at peak-power
+    takeoff_vel = vel[takeoff]  # Takeoff-velocity
+
+    ## Displacement metrics (m):
+    im_h = (takeoff_vel ** 2) / (2 * 9.807)  # Impulse-momentum method
+    ft_h = 1 / 2 * (9.807 * (flight_time / 2) ** 2)  # Flight-time method
+    di_h = disp[peak_disp]  # Double-integration method
+    im_di_m = di_h + disp[takeoff]  # Impulse-momentum + takeoff displacement
+    cm_depth = disp[cm_disp]  # Countermovement-depth
+    ll_stiff = (fzsum[brk_end] - fzsum[yld_end]) / (abs(disp[brk_end]) - abs(disp[yld_end]))  # Lower-limb stiffness
+    land_depth = -(disp[landing] - disp[zero_vel])  # Landing-depth
+
+    ## Power metrics (W):
+    peak_pwr_w = pwr[peak_pwr]  # Peak-power
+    mean_brk_pwr_w = sum(pwr[yld_end:brk_end]) / len(pwr[yld_end:brk_end])  # Mean-braking-power
+    mean_upw_pwr_w = sum(pwr[brk_end:takeoff]) / len(pwr[brk_end:takeoff])  # Mean-upward-power
+
+    ## Rate of force development (RFD) metrics (N/s):
+    unl_rfd = (fzsum[unl_end] - fzsum[unload_start]) / unl_time  # RFD: unloading
+    yld_rfd = (fzsum[yld_end] - fzsum[unl_end]) / yld_time  # RFD: yielding
+    brk_rfd = (fzsum[brk_end] - fzsum[yld_end]) / brk_time  # RFD: braking
+    peak_rfd = peak_cmj_fz / (time[peak_fz] - time[yld_end])  # RFD: yielding - peak-Fz (min to peak fz)
+    load_rfd = (fzsum[peak_land] - fzsum[landing]) / load_time  # RFD: loading
+    att_rfd = (fzsum[att_end] - fzsum[peak_land]) / att_time  # RFD: attenuation
+    cont_rfd = (fzsum[zero_vel] - fzsum[att_end]) / cont_time  # RFD: control
+
+    ### 5. Phase illustration plot:
+    fig, ax1 = plt.subplots()  # Creating the figure and the main axis
+    fig.canvas.manager.set_window_title(" ")  # Removes the title
+    fig_manager = plt.get_current_fig_manager()  # Applies the configurations to the plot
+    fig_manager.window.geometry(  # noqa
+        f"{window_width}x{window_height}+{x_pos}+{y_pos}")  # Adjusts the plot to the screen size
+
+    ax1.set_xlabel('Seconds', fontsize=20, fontweight='bold')  # Time label
+    ax1.plot(time, fzsum, color='#000000', linewidth=2, zorder=2, label='Vertical-Force (N)')
+    ax1.set_xlim(left=0, right=time[zero_vel] + time[samp_freq])
+    ax1.tick_params(axis='y', labelcolor='#000000', )  # Fz-label color
+    ax1.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))  # Sets the Fz-scale value to an integer
+
+    ax1.plot(time, fz1, color='#FF0000', linewidth=1, zorder=1, label='FP1-Fz (N)')  # FP1-Fz-settings
+    ax1.plot(time, fz2, color='#00FF00', linewidth=1, zorder=1, label='FP2-Fz (N)')  # FP2-Fz-settings
+
+    ax2 = ax1.twinx()  # Plotting the secondary lines (velocity) x-axis
+    ax2.plot(time, vel, color='#007D00', linewidth=2, linestyle='--', zorder=1, label='Velocity (m/s)')  # Vel-settings
+    ax2.tick_params(axis='y', labelcolor='#007D00')  # Velocity-label color
+    ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the velocity-scale value to one decimal
+
+    ax3 = ax1.twinx()  # Plotting the tertiary lines (displacement) x-axis
+    ax3.spines['right'].set_position(('axes', 1.05))  # Displacement-scale position
+    ax3.plot(time, disp, color='#0000FF', linewidth=2, linestyle=':', zorder=1, label='Displacement (m)')
+    ax3.tick_params(axis='y', labelcolor='#0000FF')  # Displacement-label color
+    ax3.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the disp-scale value to one decimal
+
+    cap_length = - 0.01  # Length of displacement-scale adjustment (merge with plot)
+    spine = ax3.spines['right']  # Displacement-scale adjustment position
+    line_width = spine.get_linewidth()  # Get the plot outer line width
+    line_color = spine.get_edgecolor()  # Get the plot outer line color
+    ax3.hlines([0, 1], xmin=1.05, xmax=1.05 + cap_length, transform=ax3.transAxes,
+               colors=line_color, linewidth=line_width, clip_on=False)  # Settings to merge with the outer line
+
+    lines1, labels1 = ax1.get_legend_handles_labels()  # Fz-data label
+    lines2, labels2 = ax2.get_legend_handles_labels()  # Velocity-data label
+    lines3, labels3 = ax3.get_legend_handles_labels()  # Displacement-data label
+
+    wgh_patch = mpatches.Patch(color='#808080', alpha=0.25)  # Label-Weighing
+    unl_patch = mpatches.Patch(color='#0000FF', alpha=0.25)  # Label-Unloading
+    yld_patch = mpatches.Patch(color='#00FFFF', alpha=0.25)  # Label-Yielding
+    brk_patch = mpatches.Patch(color='#00FF00', alpha=0.25)  # Label-Braking
+    upw_patch = mpatches.Patch(color='#FFFF00', alpha=0.25)  # Label-Upward
+    flight_patch = mpatches.Patch(color='#FF7D00', alpha=0.25)  # Label-Flight
+    load_patch = mpatches.Patch(color='#FF0000', alpha=0.25)  # Label-Loading
+    att_patch = mpatches.Patch(color='#7D0000', alpha=0.25)  # Label-Attenuation
+    cont_patch = mpatches.Patch(color='#FF00FF', alpha=0.25)  # Label-Control
+
+    ax1.axvspan(0, time[samp_freq], color='#808080', alpha=0.25, zorder=0)  # Weighing-delimitation
+    ax1.axvspan(time[unload_start], time[unl_end], color='#0000FF', alpha=0.25, zorder=0)  # Unloading-delimitation
+    ax1.axvspan(time[unl_end], time[yld_end], color='#00FFFF', alpha=0.25, zorder=0)  # Yielding-delimitation
+    ax1.axvspan(time[yld_end], time[brk_end], color='#00FF00', alpha=0.25, zorder=0)  # Braking-delimitation
+    ax1.axvspan(time[brk_end], time[takeoff], color='#FFFF00', alpha=0.25, zorder=0)  # Upward-delimitation
+    ax1.axvspan(time[takeoff], time[landing], color='#FF7D00', alpha=0.25, zorder=0)  # Flight-delimitation
+    ax1.axvspan(time[landing], time[peak_land], color='#FF0000', alpha=0.25, zorder=0)  # Loading-delimitation
+    ax1.axvspan(time[peak_land], time[att_end], color='#7D0000', alpha=0.25, zorder=0)  # Att-delimitation
+    ax1.axvspan(time[att_end], time[zero_vel], color='#FF00FF', alpha=0.25, zorder=0)  # Control-delimitation
+
+    # First legend: Lines
+    legend1 = ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='lower left', fontsize=9)
+
+    # Second legend: Labels
+    patch_handles = [wgh_patch, unl_patch, yld_patch, brk_patch, upw_patch, flight_patch, load_patch,
+                     att_patch, cont_patch]
+    patch_labels = ['Weighing', 'Unloading', 'Yielding', 'Braking', 'Upward', 'Flight', 'Loading',
+                    'Attenuation', 'Control']
+    ax1.legend(patch_handles, patch_labels, loc='upper left', fontsize=9)
+    ax1.add_artist(legend1)
+
+    plt.tight_layout()  # Adjusting the layout to avoid overlap
+    fig.canvas.mpl_connect('key_press_event', close_on_enter)  # If enter is pressed, the process advances (# noqa)
+    plt.show()
+
+    ### 6. Printing results and exporting data:
+    question = messagebox.askyesno(" ", "Proceed to data analysis?")
+    if not question:  # If the answer is no...
+        sys.exit(0)  # Exits the script
+    if question:  # If the answer is yes...
+        def get_output_folder():
+            messagebox.showinfo(" ", "Select a folder to save the analysis")
+            folder_select = filedialog.askdirectory(title=" ")  # Removes the title
+            if not folder_select:  # If the operation is canceled...
+                sys.exit(0)  # Exits the script
+            return folder_select  # If advances, return to the export folder
+
+        output_folder = get_output_folder()  # Export folder
+        output_file_path = os.path.join(output_folder, input_file_name + "_analysis.txt")  # Add "_analysis"
+        decimals = 3  # Number of decimals to print results
+
+        header = (
+            "Name\t"
+            "Weight (N)\t"
+            "Mass (kg)\t"
+            "\t"
+            "CoM-D (m)\t"
+            "ToV+CoM-D (m)\t"
+            "ToV-D (m)\t"
+            "FT (m)\t"
+            "CM-depth (m)\t"
+            "LL-stiff (N/m)\t"
+            "Land-depth (m)\t"
+            "\t"
+            "Mean-Upw (N)\t"
+            "Peak-Upw (N)\t"
+            "Imp-Upw (N*s)\t"
+            "Mean-Pwr-Upw (W)\t"
+            "Peak-Pwr (W)\t"
+            "Peak-RFD (N/s)\t"
+            "Peak-V-Upw (m/s)\t"
+            "V-at-PP (m/s)\t"
+            "Fz-at-PP (N)\t"
+            "\t"
+            "Mean-Brk (N)\t"
+            "Peak-Brk (N)\t"
+            "Imp-Brk (N*s)\t"
+            "Mean-Pwr-Brk (W)\t"
+            "Peak-V-Dwn (m/s)\t"
+            "RFD-Unl (N/s)\t"
+            "RFD-Yld (N/s)\t"
+            "RFD-Brk (N/s)\t"
+            "\t"
+            "Mean-Load (N)\t"
+            "Peak-Load (N)\t"
+            "Imp-Load (N*s)\t"
+            "RFD-Load (N/s)\t"
+            "Mean-Att (N)\t"
+            "Imp-Att (N*s)\t"
+            "RFD-Att (N/s)\t"
+            "Mean-Cont (N)\t"
+            "Imp-Cont (N*s)\t"
+            "RFD-Cont (N/s)\t"
+            "Amortization (N)\t"
+            "\t"
+            "Unl (s)\t"
+            "Yld (s)\t"
+            "Brk (s)\t"
+            "Upw (s)\t"
+            "Flight (s)\t"
+            "Load (s)\t"
+            "Att (s)\t"
+            "Cont (s)\t"
+            "TT-PF (s)\t"
+            "TT-PP (s)\t"
+            "TT-PV (s)\t"
+            "TT-TO (s)\t"
+            "\t"
+            "Mean-Upw1 (N)\t"
+            "Peak-Upw1 (N)\t"
+            "Imp-Upw1 (N*s)\t"
+            "Mean-Brk1 (N)\t"
+            "Peak-Brk1 (N)\t"
+            "Imp-Brk1 (N*s)\t"
+            "Mean-Load1 (N)\t"
+            "Peak-Load1 (N)\t"
+            "Imp-Load1 (N*s)\t"
+            "Mean-Att1 (N)\t"
+            "Imp-Att1 (N*s)\t"
+            "Mean-Cont1 (N)\t"
+            "Imp-Cont1 (N*s)\t"
+            "Amortization1 (N)\t"
+            "\t"
+            "Mean-Upw2 (N)\t"
+            "Peak-Upw2 (N)\t"
+            "Imp-Upw2 (N*s)\t"
+            "Mean-Brk2 (N)\t"
+            "Peak-Brk2 (N)\t"
+            "Imp-Brk2 (N*s)\t"
+            "Mean-Load2 (N)\t"
+            "Peak-Load2 (N)\t"
+            "Imp-Load2 (N*s)\t"
+            "Mean-Att2 (N)\t"
+            "Imp-Att2 (N*s)\t"
+            "Mean-Cont2 (N)\t"
+            "Imp-Cont2 (N*s)\t"
+            "Amortization2 (N)\n")
+
+        # Results:
+        with open(output_file_path, "w") as output_file:
+            output_file.write(header)
+            results = [input_file_name] + list(map(lambda x: round(x, decimals) if isinstance(x, (int, float)) else x, [
+                weight,
+                mass,
+                "",
+                di_h,
+                im_di_m,
+                im_h,
+                ft_h,
+                cm_depth,
+                ll_stiff,
+                land_depth,
+                "",
+                mean_upw_fz,
+                peak_cmj_fz,
+                upw_imp_ns,
+                mean_upw_pwr_w,
+                peak_pwr_w,
+                peak_rfd,
+                peak_vel_upw,
+                peak_pwr_vel,
+                peak_pwr_fz,
+                "",
+                mean_brk_fz,
+                peak_brk_fz,
+                brk_imp_ns,
+                mean_brk_pwr_w,
+                peak_vel_dwn,
+                unl_rfd,
+                yld_rfd,
+                brk_rfd,
+                "",
+                mean_load_fz,
+                peak_load_fz,
+                load_imp_ns,
+                load_rfd,
+                mean_att_fz,
+                att_imp_ns,
+                att_rfd,
+                mean_cont_fz,
+                cont_imp_ns,
+                cont_rfd,
+                amortization,
+                "",
+                unl_time,
+                yld_time,
+                brk_time,
+                upw_time,
+                flight_time,
+                load_time,
+                att_time,
+                cont_time,
+                time_to_pf,
+                time_to_pp,
+                time_to_pv,
+                time_to_to,
+                "",
+                mean_upw_fz1,
+                peak_cmj_fz1,
+                upw_imp_fz1,
+                mean_brk_fz1,
+                peak_brk_fz1,
+                brk_imp_fz1,
+                mean_load_fz1,
+                peak_load_fz1,
+                load_imp_fz1,
+                mean_att_fz1,
+                att_imp_fz1,
+                mean_cont_fz1,
+                cont_imp_fz1,
+                amortization1,
+                "",
+                mean_upw_fz2,
+                peak_cmj_fz2,
+                upw_imp_fz2,
+                mean_brk_fz2,
+                peak_brk_fz2,
+                brk_imp_fz2,
+                mean_load_fz2,
+                peak_load_fz2,
+                load_imp_fz2,
+                mean_att_fz2,
+                att_imp_fz2,
+                mean_cont_fz2,
+                cont_imp_fz2,
+                amortization2]))
+            output_file.write("\t".join(map(str, results)))
+            output_file.write("\n")
+            messagebox.showinfo(" ", "Analysis complete!")  # Displays the end-message
+            sys.exit(0)  # Exits the script
+
+
+def dj():
+    input_file, input_file_name = select_file()
+    samp_freq = insert_sampling_frequency()
+    time, fzsum, fz1, fz2 = read_data(input_file, samp_freq, window_width, window_height, x_pos, y_pos)
+
+    ## Time adjustments
+    time_i = 1 / samp_freq  # Time intervals based on the sampling frequency
+    thirty_ms = int(samp_freq * 0.03)  # Index equivalent to 30 milliseconds (ms)
+
+    ## Weighing adjustments:
+    back_fz = fzsum[::-1]  # Backward-Fz (N) list
+    weight = sum(back_fz[:samp_freq]) / len(back_fz[:samp_freq])  # Weight (N) in the last sec (mean Fz)
+    mass = weight / 9.807  # Weight to mass (kg)
+
+    ## Includes all errors in a single string
+    errors = ValueError, IndexError, TypeError, StopIteration, KeyError, AttributeError, ZeroDivisionError, RuntimeError
+
+    ### 3. Data processing:
+    def temporary_start():
+        """Identifies the temporary DJ-start"""
+        try:
+            for i, value in enumerate(fzsum):  # Searches the Fz-list
+                if value > 20:  # Searches for an increase in Fz > 20
+                    return i  # Returns the index of the 1st data that exceeds the threshold
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"DJ-Start")
+            sys.exit(1)  # Exits the script
+
+    temporary_drop = temporary_start()  # Temporary DJ-start-index
+
+    def search_takeoff():
+        """Identify the temporary takeoff"""
+        try:
+            for i, value in enumerate(fzsum[temporary_drop:], start=temporary_drop):  # Searches the Fz-list
+                if value < 20:  # Searches for the 1st value < 20 N
+                    return i  # Returns the temporary takeoff index
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"Takeoff")
+            sys.exit(1)  # Exits the script
+
+    temporary_to = search_takeoff()  # Temporary DJ-start-index
+
+    try:  # Searches for values > 20 N after temporary_to and returns the index of the first (minimum) value > 20 N
+        temporary_ld = min((i for i, value in enumerate(fzsum) if i >
+                            temporary_to and value > 20), key=lambda x: (fzsum[x], x))
+    except errors:
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Landing")
+        sys.exit(1)  # Exits the script
+
+    ## *Important: in the next calculation, the first 30 ms of the temporary_to index will be disregarded
+    ## 30 ms prior to the temporary_ld index will also be disregarded
+    ## The remaining interval only accounts for Fz during flight (unloaded FP)
+
+    # During the flight, the maximum (max) absolute value of Fz will serve to identify the max FP noise
+    flight_noise = abs(max(fzsum[temporary_to + thirty_ms: temporary_ld - thirty_ms], key=abs))
+    initial_noise = abs(max(fzsum[0: temporary_drop - thirty_ms], key=abs))
+    max_noise = max(flight_noise, initial_noise)
+
+    # Searches for a more precise index than 20 N to establish drop
+    drop = None
+    for i in range(temporary_drop - thirty_ms, len(fzsum)):
+        if fzsum[i] > max_noise:
+            drop = i  # Searches for the last value > max noise after temporary_drop
+            break  # Break the loop when the condition is no longer met
+    if drop is None:
+        drop = temporary_drop  # If there is no valid index: return temporary_drop (20 N)
+
+    # Searches for a more precise index than 20 N to establish takeoff
+    takeoff = None
+    for i in range(temporary_to, len(fzsum)):
+        if fzsum[i] > max_noise:
+            takeoff = i  # Searches for the last value > max noise after temporary_to
+        else:
+            break  # Break the loop when the condition is no longer met
+    if takeoff is None:
+        takeoff = temporary_to  # If there is no valid index: return temporary_to (20 N)
+
+    # Searches for a more precise index than 20 N to establish landing
+    landing = None
+    for i in range(takeoff + thirty_ms, len(fzsum)):
+        if fzsum[i] > max_noise:
+            landing = i  # Searches for the last value > max noise after takeoff
+        else:
+            break  # Break the loop when the condition is no longer met
+    if landing is None:
+        landing = temporary_ld  # If there is no valid index: return temporary_ld (20 N)
+
+    def zero_fz_noise():
+        """Zeroes the Fz values in takeoff-landing interval"""
+        if takeoff < landing and 0 <= takeoff < len(fzsum) and 0 <= landing < len(fzsum):
+            for i in range(takeoff, landing):
+                fzsum[i] = 0
+        return fzsum  # Returns the Fz-zeroed-list
+
+    fzsum = zero_fz_noise()  # Fz-zeroed-list (N)
+
+    def net_force():
+        net_fz_list = [f - weight for f in fzsum]  # Subtracts the weight from the Fz-list for each data point
+        net_fz1_list = [f - (weight / 2) for f in fz1]  # Subtracts half of the weight from the Fz1 for each data point
+        net_fz2_list = [f - (weight / 2) for f in fz2]  # Subtracts half of the weight from the Fz2 for each data point
+        return net_fz_list, net_fz1_list, net_fz2_list  # Returns the net-Fz-lists
+
+    net_fz, net_fz1, net_fz2 = net_force()  # Net-Fz-lists (N)
+
+    def net_impulse():
+        impulse_list = [0]
+        impulse_list_fz1 = [0]
+        impulse_list_fz2 = [0]
+        for i in range(1, len(net_fz)):  # Searches the net-Fz-list
+            mean_value = (net_fz[i - 1] + net_fz[i]) / 2  # Calculates the mean between two consecutive Fz intervals
+            impulse_list.append(mean_value * time_i)  # Multiply the mean Fz by the time intervals
+        for i in range(1, len(net_fz1)):
+            mean_value = (net_fz1[i - 1] + net_fz1[i]) / 2
+            impulse_list_fz1.append(mean_value * time_i)
+        for i in range(1, len(net_fz2)):
+            mean_value = (net_fz2[i - 1] + net_fz2[i]) / 2
+            impulse_list_fz2.append(mean_value * time_i)
+        return impulse_list, impulse_list_fz1, impulse_list_fz2  # Returns the net-impulse-lists
+
+    imp, imp1, imp2 = net_impulse()  # Net-impulse-lists (N*s)
+
+    def acceleration():
+        acc_list = [f / mass for f in net_fz]  # Divides the net-Fz by the mass for each data point
+        return acc_list  # Returns the acceleration-list
+
+    acc = acceleration()  # Acceleration-list (m/s^2)
+    back_acc = acc[::-1]  # Backward-acceleration-list (m/s^2)
+
+    def velocity():
+        """Calculates the cumulative velocity (1st integration) - Backward"""
+        back_vel_list = [0]  # Initializes the backward velocity list with 0
+        for i in range(1, len(back_acc) - (drop - thirty_ms * 2)):  # Searches the backward-acceleration-list
+            back_vel_list.append(back_vel_list[-1] + back_acc[i] * time_i)  # Integrates vel over time
+        while len(back_vel_list) < len(back_acc):  # Append zeros until back_vel_list is as long as back_acc
+            back_vel_list.append(0)  # This is only due to the plot scale limits
+        vel_list = [-v for v in back_vel_list[::-1]]  # Reverses the list and value of each data to match the original
+        return vel_list  # Returns the velocity-list
+
+    vel = velocity()  # Velocity-list (m/s)
+
+    def displacement():
+        """Calculates the center of mass displacement (2nd integration) - Backward"""
+        disp_list = [0]  # Initializes the displacement-list with 0
+        for i in range(len(vel) - 2, -1, -1):  # Searches the velocity-list
+            disp_list.append(disp_list[-1] + vel[i] * time_i)  # Integrates displacement over time (trapezoidal rule)
+        disp_list = [-v for v in disp_list[::-1]]  # Reverses the list and value of each data to match the original
+        return disp_list  # Returns the displacement-list
+
+    disp = displacement()  # Displacement-list (m)
+
+    def power():
+        pwr_list = [0] * drop  # List with value 0 up to 30 ms before the DJ-start
+        for i in range(drop, len(fzsum)):  # Searches the Fz-list
+            pwr_list.append(fzsum[i] * vel[i])  # Multiply the force by velocity for each data point
+        return pwr_list  # Returns the power-list
+
+    pwr = power()  # Power-list (W)
+
+    try:
+        peak_fz = fzsum.index(max(fzsum[:takeoff]))  # Peak-Fz (drop)
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-Fz-drop")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_pwr = pwr.index(max(pwr[drop:landing]))  # Peak-power
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-power")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        brk_start = vel.index(min(vel[drop:peak_fz]))  # Braking-start
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Braking-phase-start")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        brk_end = next(i for i in range(brk_start, takeoff) if vel[i] >= 0)  # Braking-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Braking-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_brak = fzsum.index(max(fzsum[brk_start:brk_end]))  # Braking-Fz-peak
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Braking-Fz-peak")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        cm_disp = disp.index(min(disp[drop:takeoff]))  # Drop-min-displacement
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Drop-minimum-displacement")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_disp = disp.index(max(disp[takeoff:landing]))  # Peak-displacement
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-displacement")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_vel = vel.index(max(vel[drop:takeoff]))  # Peak-velocity
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-upward-velocity")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_land = fzsum.index(max(fzsum[takeoff:]))  # Landing-peak-Fz / Marks loading-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Loading-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:  # Searches the fz after peak_land to find the first valley:
+        att_end = next(
+            i for i in range(peak_land + 1, len(fzsum)) if
+            fzsum[i] < fzsum[i - 1] and fzsum[i] < fzsum[i + 1])  # Attenuation-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Attenuation-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:  # Searches the velocity after attenuation-end to find the moment when the value crosses 0
+        zero_vel = next(
+            i - 1 if abs(vel[i - 1]) <= abs(vel[i]) else i
+            for i in range(att_end + 1, len(vel))
+            if vel[i - 1] < 0 <= vel[i])  # Control-phase-end (speed 0 after Attenuation-phase-end)
+        # Next exception handles the fact that 3% of the participants in a previous study didn't have a control phase
+    except StopIteration:
+        zero_vel = att_end + 1  # If not found, returns the index following attenuation-phase-end
+
+    ### 4. Metrics calculation:
+    ## Time (sec) of the DJ-phases:
+    brak_time = time[brk_end] - time[brk_start]  # Downward-braking-phase
+    upw_time = time[takeoff] - time[brk_end]  # Upward-phase
+    flight_time = time[landing] - time[takeoff]  # Flight
+    load_time = time[peak_land] - time[landing]  # Landing-loading-phase
+    att_time = time[att_end] - time[peak_land]  # Landing-attenuation-phase
+    cont_time = time[zero_vel] - time[att_end]  # Landing-control-phase
+
+    # The calculations below take the DJ-start for calculating the time
+    time_to_pf = time[peak_fz] - time[drop]  # Time to peak-Fz
+    time_to_pp = time[peak_pwr] - time[drop]  # Time to peak-power
+    time_to_pv = time[peak_vel] - time[drop]  # Time to peak-velocity
+    time_to_to = time[takeoff] - time[drop]  # Time to takeoff
+
+    ## Vertical force metrics (N):
+    mean_upw_fz = sum(fzsum[brk_end:takeoff]) / len(fzsum[brk_end:takeoff])  # Mean-Fz-upward
+    peak_drop_fz = fzsum[peak_fz]  # Peak-Fz (according to the jump-strategy, it can be the same as braking-peak)
+    mean_brk_fz = sum(fzsum[brk_start:brk_end]) / len(fzsum[brk_start:brk_end])  # Mean-Fz-braking
+    peak_brk_fz = fzsum[peak_brak]  # Braking-peak
+    mean_load_fz = sum(fzsum[landing:peak_land]) / len(fzsum[landing:peak_land])  # Mean-Fz-loading
+    peak_load_fz = fzsum[peak_land]  # Loading-peak
+    mean_att_fz = sum(fzsum[peak_land:att_end]) / len(fzsum[peak_land:att_end])  # Mean-Fz-attenuation
+    mean_cont_fz = sum(fzsum[att_end:zero_vel]) / len(fzsum[att_end:zero_vel])  # Mean-Fz-control
+    amortization = fzsum[zero_vel]  # Amortization (Fz at 0 velocity)
+    peak_pwr_fz = fzsum[peak_pwr]  # Fz at peak-power
+
+    ## Individual Fz data to calculate asymmetry:
+    mean_upw_fz1 = sum(fz1[brk_end:takeoff]) / len(fz1[brk_end:takeoff])
+    peak_fz1 = fz1[peak_fz]
+    mean_brk_fz1 = sum(fz1[brk_start:brk_end]) / len(fz1[brk_start:brk_end])
+    peak_brk_fz1 = fz1[peak_brak]
+    mean_load_fz1 = sum(fz1[landing:peak_land]) / len(fz1[landing:peak_land])
+    peak_load_fz1 = fz1[peak_land]
+    mean_att_fz1 = sum(fz1[peak_land:att_end]) / len(fz1[peak_land:att_end])
+    mean_cont_fz1 = sum(fz1[att_end:zero_vel]) / len(fz1[att_end:zero_vel])
+    amortization1 = fz1[zero_vel]
+
+    mean_upw_fz2 = sum(fz2[brk_end:takeoff]) / len(fz2[brk_end:takeoff])
+    peak_fz2 = fz2[peak_fz]
+    mean_brk_fz2 = sum(fz2[brk_start:brk_end]) / len(fz2[brk_start:brk_end])
+    peak_brk_fz2 = fz2[peak_brak]
+    mean_load_fz2 = sum(fz2[landing:peak_land]) / len(fz2[landing:peak_land])
+    peak_load_fz2 = fz2[peak_land]
+    mean_att_fz2 = sum(fz2[peak_land:att_end]) / len(fz2[peak_land:att_end])
+    mean_cont_fz2 = sum(fz2[att_end:zero_vel]) / len(fz2[att_end:zero_vel])
+    amortization2 = fz2[zero_vel]
+
+    ## Impulse metrics (N*s):
+    brk_imp_ns = sum(imp[brk_start:brk_end])  # Braking-impulse
+    upw_imp_ns = sum(imp[drop:takeoff])  # Upward-impulse
+    load_imp_ns = sum(imp[landing:peak_land])  # Loading-impulse
+    att_imp_ns = sum(imp[peak_land:att_end])  # Attenuation-impulse
+    cont_imp_ns = sum(imp[att_end:zero_vel])  # Control-impulse
+
+    ## Individual Impulse data to calculate asymmetry:
+    brk_imp_fz1 = sum(imp1[brk_start:brk_end])
+    upw_imp_fz1 = sum(imp1[brk_end:takeoff])
+    load_imp_fz1 = sum(imp1[landing:peak_land])
+    att_imp_fz1 = sum(imp1[peak_land:att_end])
+    cont_imp_fz1 = sum(imp1[att_end:zero_vel])
+
+    brk_imp_fz2 = sum(imp2[brk_start:brk_end])
+    upw_imp_fz2 = sum(imp2[brk_end:takeoff])
+    load_imp_fz2 = sum(imp2[landing:peak_land])
+    att_imp_fz2 = sum(imp2[peak_land:att_end])
+    cont_imp_fz2 = sum(imp2[att_end:zero_vel])
+
+    ## Velocity metrics (m/s):
+    peak_vel_upw = vel[peak_vel]  # Peak-upward-velocity
+    peak_pwr_vel = vel[peak_pwr]  # Velocity at peak-power
+    takeoff_vel = vel[takeoff]  # Takeoff-velocity
+
+    ## Displacement metrics (m):
+    im_h = (takeoff_vel ** 2) / (2 * 9.807)  # Impulse-momentum method
+    ft_h = 1 / 2 * (9.807 * (flight_time / 2) ** 2)  # Flight-time method
+    di_h = disp[peak_disp]  # Double-integration method
+    im_di_h = di_h + disp[takeoff]  # Impulse-momentum + takeoff displacement
+    drop_depth = disp[cm_disp]  # Drop-depth
+    ll_stiff = (fzsum[brk_end] - fzsum[brk_start]) / (abs(disp[brk_end]) - abs(disp[brk_start]))  # Lower-limb stiffness
+    land_depth = -(disp[landing] - disp[zero_vel])  # Landing-depth
+
+    ## Power metrics (W):
+    peak_pwr_w = pwr[peak_pwr]  # Peak-power
+    mean_brk_pwr_w = sum(pwr[brk_start:brk_end]) / len(pwr[brk_start:brk_end])  # Mean-braking-power
+    mean_upw_pwr_w = sum(pwr[brk_end:takeoff]) / len(pwr[brk_end:takeoff])  # Mean-upward-power
+
+    ## Rate of force development (RFD) metrics (N/s):
+    peak_rfd = peak_drop_fz / (time[peak_fz] - time[drop])  # RFD: DJ-start - peak-Fz (zero to peak fz)
+    brk_rfd = (fzsum[brk_end] - fzsum[brk_start]) / brak_time  # RFD: braking
+    load_rfd = (fzsum[peak_land] - fzsum[landing]) / load_time  # RFD: loading
+    att_rfd = (fzsum[att_end] - fzsum[peak_land]) / att_time  # RFD: attenuation
+    cont_rfd = (fzsum[zero_vel] - fzsum[att_end]) / cont_time  # RFD: control
+
+    ### 5. Phase illustration plot:
+    fig, ax1 = plt.subplots()  # Creating the figure and the main axis
+    fig.canvas.manager.set_window_title(" ")  # Removes the title
+    fig_manager = plt.get_current_fig_manager()  # Applies the configurations to the plot
+    fig_manager.window.geometry(  # noqa
+        f"{window_width}x{window_height}+{x_pos}+{y_pos}")  # Adjusts the plot to the screen size
+
+    ax1.set_xlabel('Seconds', fontsize=20, fontweight='bold')  # Time label
+    ax1.plot(time, fzsum, color='#000000', linewidth=2, zorder=2, label='Vertical-Force (N)')
+    ax1.set_xlim(left=time[drop], right=time[-1])
+    ax1.tick_params(axis='y', labelcolor='#000000', )  # Fz-label color
+    ax1.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))  # Sets the Fz-scale value to an integer
+
+    ax1.plot(time, fz1, color='#FF0000', linewidth=1, zorder=1, label='FP1-Fz (N)')  # FP1-Fz-settings
+    ax1.plot(time, fz2, color='#00FF00', linewidth=1, zorder=1, label='FP2-Fz (N)')  # FP2-Fz-settings
+
+    ax2 = ax1.twinx()  # Plotting the secondary lines (velocity) x-axis
+    ax2.plot(time, vel, color='#007D00', linewidth=2, linestyle='--', zorder=1, label='Velocity (m/s)')  # Vel-settings
+    ax2.tick_params(axis='y', labelcolor='#007D00')  # Velocity-label color
+    ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the velocity-scale value to one decimal
+
+    ax3 = ax1.twinx()  # Plotting the tertiary lines (displacement) x-axis
+    ax3.spines['right'].set_position(('axes', 1.05))  # Displacement-scale position
+    ax3.plot(time, disp, color='#0000FF', linewidth=2, linestyle=':', zorder=1, label='Displacement (m)')
+    ax3.tick_params(axis='y', labelcolor='#0000FF')  # Displacement-label color
+    ax3.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the displacement-scale value to one decimal
+
+    cap_length = - 0.01  # Length of displacement-scale adjustment (merge with plot)
+    spine = ax3.spines['right']  # Displacement-scale adjustment position
+    line_width = spine.get_linewidth()  # Get the plot outer line width
+    line_color = spine.get_edgecolor()  # Get the plot outer line color
+    ax3.hlines([0, 1], xmin=1.05, xmax=1.05 + cap_length, transform=ax3.transAxes,
+               colors=line_color, linewidth=line_width, clip_on=False)  # Settings to merge with the outer line
+
+    lines1, labels1 = ax1.get_legend_handles_labels()  # Fz-data label
+    lines2, labels2 = ax2.get_legend_handles_labels()  # Velocity-data label
+    lines3, labels3 = ax3.get_legend_handles_labels()  # Displacement-data label
+
+    contact_patch = mpatches.Patch(color='#00FFFF', alpha=0.25)  # Label-Contact
+    brk_patch = mpatches.Patch(color='#00FF00', alpha=0.25)  # Label-Braking
+    upw_patch = mpatches.Patch(color='#FFFF00', alpha=0.25)  # Label-Upward
+    flight_patch = mpatches.Patch(color='#FF7D00', alpha=0.25)  # Label-Flight
+    load_patch = mpatches.Patch(color='#FF0000', alpha=0.25)  # Label-Loading
+    att_patch = mpatches.Patch(color='#7D0000', alpha=0.25)  # Label-Attenuation
+    cont_patch = mpatches.Patch(color='#FF00FF', alpha=0.25)  # Label-Control
+    weighing_patch = mpatches.Patch(color='#808080', alpha=0.25)  # Label-Weighing
+
+    ax1.axvspan(time[-samp_freq], time[-1], color='#808080', alpha=0.25, zorder=0)  # Weighing-delimitation
+    ax1.axvspan(time[drop], time[brk_start], color='#00FFFF', alpha=0.25, zorder=0)  # Contact delimitation
+    ax1.axvspan(time[brk_start], time[brk_end], color='#00FF00', alpha=0.25, zorder=0)  # Braking-delimitation
+    ax1.axvspan(time[brk_end], time[takeoff], color='#FFFF00', alpha=0.25, zorder=0)  # Upward-delimitation
+    ax1.axvspan(time[takeoff], time[landing], color='#FF7D00', alpha=0.25, zorder=0)  # Flight-delimitation
+    ax1.axvspan(time[landing], time[peak_land], color='#FF0000', alpha=0.25, zorder=0)  # Loading-delimitation
+    ax1.axvspan(time[peak_land], time[att_end], color='#7D0000', alpha=0.25, zorder=0)  # Attenuation-delimitation
+    ax1.axvspan(time[att_end], time[zero_vel], color='#FF00FF', alpha=0.25, zorder=0)  # Control-delimitation
+
+    # First legend: Lines
+    legend1 = ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='lower right', fontsize=9)
+
+    # Second legend: Labels
+    patch_handles = [contact_patch, brk_patch, upw_patch, flight_patch, load_patch,
+                     att_patch, cont_patch, weighing_patch]
+    patch_labels = ['Contact', 'Braking', 'Upward', 'Flight', 'Loading', 'Attenuation', 'Control', 'Weighing']
+    ax1.legend(patch_handles, patch_labels, loc='upper right', fontsize=9)
+    ax1.add_artist(legend1)
+
+    plt.tight_layout()  # Adjusting the layout to avoid overlap
+    fig.canvas.mpl_connect('key_press_event', close_on_enter)  # If enter is pressed, the process advances (# noqa)
+    plt.show()
+
+    ### 6. Printing results and exporting data:
+    question = messagebox.askyesno(" ", "Proceed to data analysis?")
+    if not question:  # If the answer is no...
+        sys.exit(0)  # Exits the script
+    if question:  # If the answer is yes...
+        def get_output_folder():
+            messagebox.showinfo(" ", "Select a folder to save the analysis")
+            folder_select = filedialog.askdirectory(title=" ")  # Removes the title
+            if not folder_select:  # If the operation is canceled...
+                sys.exit(0)  # Exits the script
+            return folder_select  # If advances, return to the export folder
+
+        output_folder = get_output_folder()  # Export folder
+        output_file_path = os.path.join(output_folder, input_file_name + "_analysis.txt")  # Add "_analysis"
+        decimals = 3  # Number of decimals to print results
+
+        header = (
+            "Name\t"
+            "Weight (N)\t"
+            "Mass (kg)\t"
+            "\t"
+            "CoM-D (m)\t"
+            "ToV+CoM-D (m)\t"
+            "ToV-D (m)\t"
+            "FT (m)\t"
+            "Drop-depth (m)\t"
+            "LL-stiff (m)\t"
+            "Land-depth (m)\t"
+            "\t"
+            "Mean-Upw (N)\t"
+            "Peak-Drop (N)\t"
+            "Imp-Upw (N*s)\t"
+            "Mean-Pwr-Upw (W)\t"
+            "Peak-Pwr (W)\t"
+            "Peak-RFD (N/s)\t"
+            "Peak-V-Upw (m/s)\t"
+            "V-at-PP (m/s)\t"
+            "Fz-at-PP (N)\t"
+            "\t"
+            "Mean-Brk (N)\t"
+            "Peak-Brk (N)\t"
+            "Imp-Brk (N*s)\t"
+            "Mean-Pwr-Brk (W)\t"
+            "RFD-Brak (N/s)\t"
+            "\t"
+            "Mean-Load (N)\t"
+            "Peak-Load (N)\t"
+            "Imp-Load (N*s)\t"
+            "RFD-Load (N/s)\t"
+            "Mean-Att (N)\t"
+            "Imp-Att (N*s)\t"
+            "RFD-Att (N/s)\t"
+            "Mean-Cont (N)\t"
+            "Imp-Cont (N*s)\t"
+            "RFD-Cont (N/s)\t"
+            "Amortization (N)\t"
+            "\t"
+            "Brak (s)\t"
+            "Upw (s)\t"
+            "Flight (s)\t"
+            "Load (s)\t"
+            "Att (s)\t"
+            "Cont (s)\t"
+            "TT-PF (s)\t"
+            "TT-PP (s)\t"
+            "TT-PV (s)\t"
+            "TT-TO (s)\t"
+            "\t"
+            "Mean-Upw1 (N)\t"
+            "Peak-Upw1 (N)\t"
+            "Imp-Upw1 (N*s)\t"
+            "Mean-Brk1 (N)\t"
+            "Peak-Brk1 (N)\t"
+            "Imp-Brk1 (N*s)\t"
+            "Mean-Load1 (N)\t"
+            "Peak-Load1 (N)\t"
+            "Imp-Load1 (N*s)\t"
+            "Mean-Att1 (N)\t"
+            "Imp-Att1 (N*s)\t"
+            "Mean-Cont1 (N)\t"
+            "Imp-Cont1 (N*s)\t"
+            "Amortization1 (N)\t"
+            "\t"
+            "Mean-Upw2 (N)\t"
+            "Peak-Upw2 (N)\t"
+            "Imp-Upw2 (N*s)\t"
+            "Mean-Brk2 (N)\t"
+            "Peak-Brk2 (N)\t"
+            "Imp-Brk2 (N*s)\t"
+            "Mean-Load2 (N)\t"
+            "Peak-Load2 (N)\t"
+            "Imp-Load2 (N*s)\t"
+            "Mean-Att2 (N)\t"
+            "Imp-Att2 (N*s)\t"
+            "Mean-Cont2 (N)\t"
+            "Imp-Cont2 (N*s)\t"
+            "Amortization2 (N)\n")
+
+        # Results:
+        with open(output_file_path, "w") as output_file:
+            output_file.write(header)
+            results = [input_file_name] + list(map(lambda x: round(x, decimals) if isinstance(x, (int, float)) else x, [
+                weight,
+                mass,
+                "",
+                di_h,
+                im_di_h,
+                im_h,
+                ft_h,
+                drop_depth,
+                ll_stiff,
+                land_depth,
+                "",
+                mean_upw_fz,
+                peak_drop_fz,
+                upw_imp_ns,
+                mean_upw_pwr_w,
+                peak_pwr_w,
+                peak_rfd,
+                peak_vel_upw,
+                peak_pwr_vel,
+                peak_pwr_fz,
+                "",
+                mean_brk_fz,
+                peak_brk_fz,
+                brk_imp_ns,
+                mean_brk_pwr_w,
+                brk_rfd,
+                "",
+                mean_load_fz,
+                peak_load_fz,
+                load_imp_ns,
+                load_rfd,
+                mean_att_fz,
+                att_imp_ns,
+                att_rfd,
+                mean_cont_fz,
+                cont_imp_ns,
+                cont_rfd,
+                amortization,
+                "",
+                brak_time,
+                upw_time,
+                flight_time,
+                load_time,
+                att_time,
+                cont_time,
+                time_to_pf,
+                time_to_pp,
+                time_to_pv,
+                time_to_to,
+                "",
+                mean_upw_fz1,
+                peak_fz1,
+                upw_imp_fz1,
+                mean_brk_fz1,
+                peak_brk_fz1,
+                brk_imp_fz1,
+                mean_load_fz1,
+                peak_load_fz1,
+                load_imp_fz1,
+                mean_att_fz1,
+                att_imp_fz1,
+                mean_cont_fz1,
+                cont_imp_fz1,
+                amortization1,
+                "",
+                mean_upw_fz2,
+                peak_fz2,
+                upw_imp_fz2,
+                mean_brk_fz2,
+                peak_brk_fz2,
+                brk_imp_fz2,
+                mean_load_fz2,
+                peak_load_fz2,
+                load_imp_fz2,
+                mean_att_fz2,
+                att_imp_fz2,
+                mean_cont_fz2,
+                cont_imp_fz2,
+                amortization2]))
+            output_file.write("\t".join(map(str, results)))
+            output_file.write("\n")
+            messagebox.showinfo(" ", "Analysis complete!")  # Displays the end-message
+            sys.exit(0)  # Exits the script
+
+
+def sj():
+    input_file, input_file_name = select_file()
+    samp_freq = insert_sampling_frequency()
+    time, fzsum, fz1, fz2 = read_data(input_file, samp_freq, window_width, window_height, x_pos, y_pos)
+
+    ## Time adjustments
+    time_i = 1 / samp_freq  # Time intervals based on the sampling frequency
+    thirty_ms = int(samp_freq * 0.03)  # Index equivalent to 30 milliseconds (ms)
+
+    ## Weighing adjustments:
+    back_fz = fzsum[::-1]  # Backward-Fz (N) list
+    weight = sum(back_fz[:samp_freq]) / len(back_fz[:samp_freq])  # Weight (N) in the last sec (mean Fz)
+    mass = weight / 9.807  # Weight to mass (kg)
+    five_sd = np.std(back_fz[:samp_freq]) * 5  # SDx5 in the last sec
+
+    ## Includes all errors in a single string
+    errors = ValueError, IndexError, TypeError, StopIteration, KeyError, AttributeError, ZeroDivisionError, RuntimeError
+
+    ### 3. Data processing:
+    def temporary_start():
+        """Identifies the temporary SJ-start"""
+        try:
+            for i, value in enumerate(fzsum):  # Searches the Fz-list
+                if value > (weight + five_sd) or value < (weight - five_sd):  # Searches for an alteration in Fz = SDx5
+                    return i  # Returns the index of the 1st data that exceeds the threshold
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"SJ-Start\n"
+                                      f"Ensure that there is at least 1 second of stable-Fz after the SJ-landing")
+            sys.exit(1)  # Exits the script
+
+    temporary_prop_start = temporary_start()  # Temporary SJ-start-index
+
+    def search_takeoff():
+        """Identify the temporary takeoff"""
+        try:
+            for i, value in enumerate(fzsum[temporary_prop_start:], start=temporary_prop_start):  # Searches the Fz-list
+                if value < 20:  # Searches for the 1st value < 20 N
+                    return i  # Returns the temporary takeoff index
+        except errors:
+            messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                      f"Takeoff")
+            sys.exit(1)  # Exits the script
+
+    temporary_to = search_takeoff()  # Temporary takeoff index
+
+    try:  # Searches for values > 20 N after temporary_to and returns the index of the first (minimum) value > 20 N
+        temporary_ld = min((i for i, value in enumerate(fzsum) if i >
+                            temporary_to and value > 20), key=lambda x: (fzsum[x], x))
+    except errors:
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Landing")
+        sys.exit(1)  # Exits the script
+
+    ## *Important: in the next calculation, the first 30 ms of the temporary_to index will be disregarded
+    ## 30 ms prior to the temporary_ld index will also be disregarded
+    ## The remaining interval only accounts for Fz during flight (unloaded FP)
+
+    # During the flight, the maximum (max) absolute value of Fz will serve to identify the max FP noise
+    max_noise = abs(max(fzsum[temporary_to + thirty_ms: temporary_ld - thirty_ms], key=abs))
+
+    # Searches for a more precise index than 20 N to establish takeoff
+    takeoff = None
+    for i in range(temporary_to, len(fzsum)):
+        if fzsum[i] > max_noise:
+            takeoff = i  # Searches for the last value > max noise after temporary_to
+        else:
+            break  # Break the loop when the condition is no longer met
+    if takeoff is None:
+        takeoff = temporary_to  # If there is no valid index: return temporary_to (20 N)
+
+    # Searches for a more precise index than 20 N to establish landing
+    landing = None
+    for i in range(takeoff + thirty_ms, len(fzsum)):
+        if fzsum[i] > max_noise:
+            landing = i  # Searches for the last value > max noise after takeoff
+        else:
+            break  # Break the loop when the condition is no longer met
+    if landing is None:
+        landing = temporary_ld  # If there is no valid index: return temporary_ld (20 N)
+
+    def propulsion_start():
+        """Identifies the propulsion to define the SJ-start"""
+        # This function will serve to identify the SJ-start, beginning the search 1 sec before the flight time
+        # Preventing prior noise from being mistakenly identified as the SJ-start
+        # If there are not 1 second before takeoff, the search starts at index 0
+        start_index = max(0, takeoff - samp_freq)  # Marks the index equivalent to 1 second before flight
+        for i, value in enumerate(fzsum[start_index:], start=start_index):  # Searches the Fz-list
+            if value > (weight + five_sd) or value < (weight - five_sd):  # Searches for an alteration in Fz = SDx5
+                return i  # Returns the index of the 1st data that exceeds the threshold
+
+    prop_start = propulsion_start()  # SJ-start-index
+    int_start = prop_start - thirty_ms  # Defines a window of 30 ms prior to the SJ-start
+
+    def zero_fz_noise():
+        """Zeroes the Fz values in takeoff-landing interval"""
+        if takeoff < landing and 0 <= takeoff < len(fzsum) and 0 <= landing < len(fzsum):
+            for i in range(takeoff, landing):
+                fzsum[i] = 0
+        return fzsum  # Returns the Fz-zeroed-list
+
+    fzsum = zero_fz_noise()  # Fz-zeroed-list (N)
+
+    def net_force():
+        net_fz_list = [f - weight for f in fzsum]  # Subtracts the weight from the Fz-list for each data point
+        net_fz1_list = [f - (weight / 2) for f in fz1]  # Subtracts half of the weight from the Fz1 for each data point
+        net_fz2_list = [f - (weight / 2) for f in fz2]  # Subtracts half of the weight from the Fz2 for each data point
+        return net_fz_list, net_fz1_list, net_fz2_list  # Returns the net-Fz-lists
+
+    net_fz, net_fz1, net_fz2 = net_force()  # Net-Fz-lists (N)
+
+    def net_impulse():
+        impulse_list = [0]
+        impulse_list_fz1 = [0]
+        impulse_list_fz2 = [0]
+        for i in range(1, len(net_fz)):  # Searches the net-Fz-list
+            mean_value = (net_fz[i - 1] + net_fz[i]) / 2  # Calculates the mean between two consecutive Fz intervals
+            impulse_list.append(mean_value * time_i)  # Multiply the mean Fz by the time intervals
+        for i in range(1, len(net_fz1)):
+            mean_value = (net_fz1[i - 1] + net_fz1[i]) / 2
+            impulse_list_fz1.append(mean_value * time_i)
+        for i in range(1, len(net_fz2)):
+            mean_value = (net_fz2[i - 1] + net_fz2[i]) / 2
+            impulse_list_fz2.append(mean_value * time_i)
+        return impulse_list, impulse_list_fz1, impulse_list_fz2  # Returns the net-impulse-lists
+
+    imp, imp1, imp2 = net_impulse()  # Net-impulse-lists (N*s)
+
+    def acceleration():
+        acc_list = [f / mass for f in net_fz]  # Divides the net-Fz by the mass for each data point
+        return acc_list  # Returns the acceleration-list
+
+    acc = acceleration()  # Acceleration-list (m/s^2)
+    back_acc = acc[::-1]  # Backward-acceleration-list (m/s^2)
+
+    def velocity():
+        """Calculates the cumulative velocity (1st integration) - Backward"""
+        back_vel_list = [0]  # Initializes the backward velocity list with 0
+        for i in range(1, len(back_acc)):  # Searches the backward-acceleration-list
+            back_vel_list.append(back_vel_list[-1] + back_acc[i] * time_i)  # Integrates vel over time
+        vel_list = [-v for v in back_vel_list[::-1]]  # Reverses the list and value of each data to match the original
+        return vel_list  # Returns the velocity-list
+
+    vel = velocity()  # Velocity-list (m/s)
+
+    def displacement():
+        """Calculates the center of mass displacement (2nd integration) - Backward"""
+        disp_list = [0]  # Initializes the displacement-list with 0
+        for i in range(len(vel) - 2, -1, -1):  # Searches the velocity-list
+            disp_list.append(disp_list[-1] + vel[i] * time_i)  # Integrates displacement over time (trapezoidal rule)
+        disp_list = [-v for v in disp_list[::-1]]  # Reverses the list and value of each data to match the original
+        return disp_list  # Returns the displacement-list
+
+    disp = displacement()  # Displacement-list (m)
+
+    def power():
+        pwr_list = [0] * int_start  # List with value 0 up to 30 ms before the SJ-start
+        for i in range(int_start, len(fzsum)):  # Searches the Fz-list
+            pwr_list.append(fzsum[i] * vel[i])  # Multiply the force by velocity for each data point
+        return pwr_list  # Returns the power-list
+
+    pwr = power()  # Power-list (W)
+
+    try:
+        peak_fz = fzsum.index(max(fzsum[:takeoff]))  # Peak-Fz (propulsion)
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-Fz-propulsion")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_pwr = pwr.index(max(pwr[prop_start:landing]))  # Peak-power
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-power")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_disp = disp.index(max(disp[takeoff:landing]))  # Peak-displacement
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-displacement")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_vel = vel.index(max(vel[prop_start:takeoff]))  # Peak-velocity
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Peak-propulsion-velocity")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        peak_land = fzsum.index(max(fzsum[takeoff:]))  # Landing-peak-Fz / Marks loading-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Loading-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:
+        # Searches the fz after peak_land to find the first valley:
+        att_end = next(
+            i for i in range(peak_land + 1, len(fzsum)) if
+            fzsum[i] < fzsum[i - 1] and fzsum[i] < fzsum[i + 1])  # Attenuation-phase-end
+    except errors as errors:  # If it was not possible to identify...
+        messagebox.showerror(" ", f"It was not possible to identify:\n"
+                                  f"Attenuation-phase-end")  # Error message
+        sys.exit(1)  # Exits the script
+
+    try:  # Searches the velocity after attenuation-end to find the moment when the value crosses 0
+        zero_vel = next(
+            i - 1 if abs(vel[i - 1]) <= abs(vel[i]) else i
+            for i in range(att_end + 1, len(vel))
+            if vel[i - 1] < 0 <= vel[i])  # Control-phase-end (speed 0 after Attenuation-phase-end)
+        # Next exception handles the fact that 3% of the participants in a previous study didn't have a control phase
+    except StopIteration:
+        zero_vel = att_end + 1  # If not found, returns the index following attenuation-phase-end
+
+    ### 4. Metrics calculation:
+    ### Time (sec) of the SJ-phases:
+    prop_time = time[takeoff] - time[prop_start]  # Propulsion
+    flight_time = time[landing] - time[takeoff]  # Flight
+    load_time = time[peak_land] - time[landing]  # Landing-loading-phase
+    att_time = time[att_end] - time[peak_land]  # Landing-attenuation-phase
+    cont_time = time[zero_vel] - time[att_end]  # Landing-control-phase
+
+    # The calculations below take the SJ-start for calculating the time
+    time_to_pf = time[peak_fz] - time[prop_start]  # Time to peak-Fz
+    time_to_pp = time[peak_pwr] - time[prop_start]  # Time to peak-power
+    time_to_pv = time[peak_vel] - time[prop_start]  # Time to peak-velocity
+    time_to_to = time[takeoff] - time[prop_start]  # Time to takeoff
+
+    ## Vertical force metrics (N):
+    mean_prop_fz = sum(fzsum[prop_start:takeoff]) / len(fzsum[prop_start:takeoff])  # Mean-Fz-propulsion
+    peak_prop_fz = fzsum[peak_fz]  # Peak-propulsion-Fz
+
+    half_sj = prop_start + (len(fzsum[prop_start:takeoff]) // 2)  # Divides the propulsion index into two parts
+    mean_sj1_fz = sum(fzsum[prop_start:half_sj]) / len(fzsum[prop_start:half_sj])  # Mean-Fz-SJ-phase1
+    mean_sj2_fz = sum(fzsum[half_sj:takeoff]) / len(fzsum[half_sj:takeoff])  # Mean-Fz-SJ-phase2
+
+    mean_load_fz = sum(fzsum[landing:peak_land]) / len(fzsum[landing:peak_land])  # Mean-Fz-loading
+    peak_load_fz = fzsum[peak_land]  # Loading-peak
+    mean_att_fz = sum(fzsum[peak_land:att_end]) / len(fzsum[peak_land:att_end])  # Mean-Fz-attenuation
+    mean_cont_fz = sum(fzsum[att_end:zero_vel]) / len(fzsum[att_end:zero_vel])  # Mean-Fz-control
+    amortization = fzsum[zero_vel]  # Amortization (Fz at 0 velocity)
+    peak_pwr_fz = fzsum[peak_pwr]  # Fz at peak-power
+
+    ## Individual Fz data to calculate asymmetry:
+    mean_prop_fz1 = sum(fz1[prop_start:takeoff]) / len(fz1[prop_start:takeoff])
+    peak_fz1 = fz1[peak_fz]
+    mean_sj1_fz1 = sum(fz1[prop_start:half_sj]) / len(fz1[prop_start:half_sj])
+    mean_sj2_fz1 = sum(fz1[half_sj:takeoff]) / len(fz1[half_sj:takeoff])
+    mean_load_fz1 = sum(fz1[landing:peak_land]) / len(fz1[landing:peak_land])
+    peak_load_fz1 = fz1[peak_land]
+    mean_att_fz1 = sum(fz1[peak_land:att_end]) / len(fz1[peak_land:att_end])
+    mean_cont_fz1 = sum(fz1[att_end:zero_vel]) / len(fz1[att_end:zero_vel])
+    amortization1 = fz1[zero_vel]
+
+    mean_prop_fz2 = sum(fz2[prop_start:takeoff]) / len(fz2[prop_start:takeoff])
+    peak_fz2 = fz2[peak_fz]
+    mean_sj1_fz2 = sum(fz2[prop_start:half_sj]) / len(fz2[prop_start:half_sj])
+    mean_sj2_fz2 = sum(fz2[half_sj:takeoff]) / len(fz2[half_sj:takeoff])
+    mean_load_fz2 = sum(fz2[landing:peak_land]) / len(fz2[landing:peak_land])
+    peak_load_fz2 = fz2[peak_land]
+    mean_att_fz2 = sum(fz2[peak_land:att_end]) / len(fz2[peak_land:att_end])
+    mean_cont_fz2 = sum(fz2[att_end:zero_vel]) / len(fz2[att_end:zero_vel])
+    amortization2 = fz2[zero_vel]
+
+    ## Impulse metrics (N*s):
+    prop_imp_ns = sum(imp[prop_start:takeoff])  # Propulsion-impulse
+    sj1_imp_ns = sum(imp[prop_start:half_sj])  # SJ1-impulse
+    sj2_imp_ns = sum(imp[half_sj:takeoff])  # SJ2-impulse
+    load_imp_ns = sum(imp[landing:peak_land])  # Loading-impulse
+    att_imp_ns = sum(imp[peak_land:att_end])  # Attenuation-impulse
+    cont_imp_ns = sum(imp[att_end:zero_vel])  # Control-impulse
+
+    ## Individual Impulse data to calculate asymmetry:
+    prop_imp_fz1 = sum(imp1[prop_start:takeoff])
+    load_imp_fz1 = sum(imp1[landing:peak_land])
+    att_imp_fz1 = sum(imp1[peak_land:att_end])
+    cont_imp_fz1 = sum(imp1[att_end:zero_vel])
+
+    prop_imp_fz2 = sum(imp2[prop_start:takeoff])
+    load_imp_fz2 = sum(imp2[landing:peak_land])
+    att_imp_fz2 = sum(imp2[peak_land:att_end])
+    cont_imp_fz2 = sum(imp2[att_end:zero_vel])
+
+    ## Velocity metrics (m/s):
+    peak_vel_prop = vel[peak_vel]  # Peak-propulsion-velocity
+    peak_pwr_vel = vel[peak_pwr]  # Velocity at peak-power
+    takeoff_vel = vel[takeoff]  # Takeoff-velocity
+
+    ## Displacement metrics (m):
+    im_h = (takeoff_vel ** 2) / (2 * 9.807)  # Impulse-momentum method
+    ft_h = 1 / 2 * (9.807 * (flight_time / 2) ** 2)  # Flight-time method
+    di_h = disp[peak_disp]  # Double-integration method
+    im_di_h = di_h + disp[takeoff]  # Impulse-momentum + takeoff displacement
+    land_depth = -(disp[landing] - disp[zero_vel])  # Landing-depth
+
+    ## Power metrics (W):
+    peak_pwr_w = pwr[peak_pwr]  # Peak-power
+    mean_prop_pwr_w = sum(pwr[prop_start:takeoff]) / len(pwr[prop_start:takeoff])  # Mean-propulsion-power
+    mean_sj1_pwr_w = sum(pwr[prop_start:half_sj]) / len(pwr[prop_start:half_sj])  # Mean-SJ1-power
+    mean_sj2_pwr_w = sum(pwr[half_sj:takeoff]) / len(pwr[half_sj:takeoff])  # Mean-SJ2-power
+
+    ## Rate of force development (RFD) metrics (N/s):
+    peak_rfd = peak_prop_fz / (time[peak_fz] - time[prop_start])  # RFD: propulsion-start - peak-Fz (zero to peak fz)
+    load_rfd = (fzsum[peak_land] - fzsum[landing]) / load_time  # RFD: loading
+    att_rfd = (fzsum[att_end] - fzsum[peak_land]) / att_time  # RFD: attenuation
+    cont_rfd = (fzsum[zero_vel] - fzsum[att_end]) / cont_time  # RFD: control
+
+    ### 5. Phase illustration plot:
+    fig, ax1 = plt.subplots()  # Creating the figure and the main axis
+    fig.canvas.manager.set_window_title(" ")  # Removes the title
+    fig_manager = plt.get_current_fig_manager()  # Applies the configurations to the plot
+    fig_manager.window.geometry(  # noqa
+        f"{window_width}x{window_height}+{x_pos}+{y_pos}")  # Adjusts the plot to the screen size
+
+    ax1.set_xlabel('Seconds', fontsize=20, fontweight='bold')  # Time label
+    ax1.plot(time, fzsum, color='#000000', linewidth=2, zorder=2, label='Vertical-Force (N)')
+    ax1.set_xlim(left=time[prop_start], right=time[-1])  # x-axis start
+    ax1.tick_params(axis='y', labelcolor='#000000', )  # Fz-label color
+    ax1.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))  # Sets the Fz-scale value to an integer
+
+    ax1.plot(time, fz1, color='#FF0000', linewidth=1, zorder=1, label='FP1-Fz (N)')  # FP1-Fz-settings
+    ax1.plot(time, fz2, color='#00FF00', linewidth=1, zorder=1, label='FP2-Fz (N)')  # FP2-Fz-settings
+
+    ax2 = ax1.twinx()  # Plotting the secondary lines (velocity) x-axis
+    ax2.plot(time, vel, color='#007D00', linewidth=2, linestyle='--', zorder=1, label='Velocity (m/s)')  # Vel-settings
+    ax2.tick_params(axis='y', labelcolor='#007D00')  # Velocity-label color
+    ax2.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the velocity-scale value to one decimal
+
+    ax3 = ax1.twinx()  # Plotting the tertiary lines (displacement) x-axis
+    ax3.spines['right'].set_position(('axes', 1.05))  # Displacement-scale position
+    ax3.plot(time, disp, color='#0000FF', linewidth=2, linestyle=':', zorder=1, label='Displacement (m)')
+    ax3.tick_params(axis='y', labelcolor='#0000FF')  # Displacement-label color
+    ax3.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))  # Sets the displacement-scale value to one decimal
+
+    cap_length = - 0.01  # Length of displacement-scale adjustment (merge with plot)
+    spine = ax3.spines['right']  # Displacement-scale adjustment position
+    line_width = spine.get_linewidth()  # Get the plot outer line width
+    line_color = spine.get_edgecolor()  # Get the plot outer line color
+    ax3.hlines([0, 1], xmin=1.05, xmax=1.05 + cap_length, transform=ax3.transAxes,
+               colors=line_color, linewidth=line_width, clip_on=False)  # Settings to merge with the outer line
+
+    # Illustrating the key-SJ-intervals:
+    lines1, labels1 = ax1.get_legend_handles_labels()  # Fz-data label
+    lines2, labels2 = ax2.get_legend_handles_labels()  # Velocity-data label
+    lines3, labels3 = ax3.get_legend_handles_labels()  # Displacement-data label
+
+    prop_patch = mpatches.Patch(color='#FFFF00', alpha=0.25)  # Label-Propulsion phase
+    flight_patch = mpatches.Patch(color='#FF7D00', alpha=0.25)  # Label-Flight
+    load_patch = mpatches.Patch(color='#FF0000', alpha=0.25)  # Label-Loading
+    att_patch = mpatches.Patch(color='#7D0000', alpha=0.25)  # Label-Attenuation
+    cont_patch = mpatches.Patch(color='#FF00FF', alpha=0.25)  # Label-Control
+    weighing_patch = mpatches.Patch(color='#808080', alpha=0.25)  # Label-Weighing
+
+    ax1.axvspan(time[-samp_freq], time[-1], color='#808080', alpha=0.25, zorder=0)  # Weighing-delimitation
+    ax1.axvspan(time[prop_start], time[takeoff], color='#FFFF00', alpha=0.25, zorder=0)  # Propulsion-delimitation
+    ax1.axvspan(time[takeoff], time[landing], color='#FF7D00', alpha=0.25, zorder=0)  # Flight-delimitation
+    ax1.axvspan(time[landing], time[peak_land], color='#FF0000', alpha=0.25, zorder=0)  # Loading-delimitation
+    ax1.axvspan(time[peak_land], time[att_end], color='#7D0000', alpha=0.25, zorder=0)  # Attenuation-delimitation
+    ax1.axvspan(time[att_end], time[zero_vel], color='#FF00FF', alpha=0.25, zorder=0)  # Control-delimitation
+
+    # First legend: Lines
+    legend1 = ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='lower right', fontsize=9)
+
+    # Second legend: Labels
+    patch_handles = [prop_patch, flight_patch, load_patch, att_patch, cont_patch, weighing_patch]
+    patch_labels = ['Propulsion', 'Flight', 'Loading', 'Attenuation', 'Control', 'Weighing']
+    ax1.legend(patch_handles, patch_labels, loc='upper right', fontsize=9)
+    ax1.add_artist(legend1)
+
+    plt.tight_layout()  # Adjusting the layout to avoid overlap
+    fig.canvas.mpl_connect('key_press_event', close_on_enter)  # If enter is pressed, the process advances (# noqa)
+    plt.show()
+
+    ### 6. Printing results and exporting data:
+    question = messagebox.askyesno(" ", "Proceed to data analysis?")
+    if not question:  # If the answer is no...
+        sys.exit(0)  # Exits the script
+    if question:  # If the answer is yes...
+        def get_output_folder():
+            messagebox.showinfo(" ", "Select a folder to save the analysis")
+            folder_select = filedialog.askdirectory(title=" ")  # Removes the title
+            if not folder_select:  # If the operation is canceled...
+                sys.exit(0)  # Exits the script
+            return folder_select  # If advances, return to the export folder
+
+        output_folder = get_output_folder()  # Export folder
+        output_file_path = os.path.join(output_folder, input_file_name + "_analysis.txt")  # Add "_analysis"
+        decimals = 3  # Number of decimals to print results
+
+        header = (
+            "Name\t"
+            "Weight (N)\t"
+            "Mass (kg)\t"
+            "\t"
+            "CoM-D (m)\t"
+            "ToV+CoM-D (m)\t"
+            "ToV-D (m)\t"
+            "FT (m)\t"
+            "Land-depth (m)\t"
+            "\t"
+            "Mean-Prop (N)\t"
+            "Peak-Prop (N)\t"
+            "Imp-Prop (N*s)\t"
+            "Mean-Pwr-Prop (W)\t"
+            "Peak-Pwr (W)\t"
+            "Peak-V-Prop (m/s)\t"
+            "Mean-SJ1 (N)\t"
+            "Imp-SJ1 (N*s)\t"
+            "Mean-Pwr-SJ1 (W)\t"
+            "Mean-SJ2 (N)\t"
+            "Imp-SJ2 (N*s)\t"
+            "Mean-Pwr-SJ2 (W)\t"
+            "Peak-RFD (N/s)\t"
+            "V-at-PP (m/s)\t"
+            "Fz-at-PP (N)\t"
+            "\t"
+            "Mean-Load (N)\t"
+            "Peak-Load (N)\t"
+            "Imp-Load (N*s)\t"
+            "RFD-Load (N/s)\t"
+            "Mean-Att (N)\t"
+            "Imp-Att (N*s)\t"
+            "RFD-Att (N/s)\t"
+            "Mean-Cont (N)\t"
+            "Imp-Cont (N*s)\t"
+            "RFD-Cont (N/s)\t"
+            "Amortization (N)\t"
+            "\t"
+            "Prop (s)\t"
+            "Flight (s)\t"
+            "Load (s)\t"
+            "Att (s)\t"
+            "Cont (s)\t"
+            "TT-PF (s)\t"
+            "TT-PP (s)\t"
+            "TT-PV (s)\t"
+            "TT-TO (s)\t"
+            "\t"
+            "Mean-Prop1 (N)\t"
+            "Peak-Prop1 (N)\t"
+            "Imp-Prop1 (N*s)\t"
+            "Mean-SJ1-1 (N)\t"
+            "Mean-SJ2-1 (N)\t"
+            "Mean-Load1 (N)\t"
+            "Peak-Load1 (N)\t"
+            "Imp-Load1 (N*s)\t"
+            "Mean-Att1 (N)\t"
+            "Imp-Att1 (N*s)\t"
+            "Mean-Cont1 (N)\t"
+            "Imp-Cont1 (N*s)\t"
+            "Amortization1 (N)\t"
+            "\t"
+            "Mean-Prop2 (N)\t"
+            "Peak-Prop2 (N)\t"
+            "Imp-Prop2 (N*s)\t"
+            "Mean-SJ1-2 (N)\t"
+            "Mean-SJ2-2 (N)\t"
+            "Mean-Load2 (N)\t"
+            "Peak-Load2 (N)\t"
+            "Imp-Load2 (N*s)\t"
+            "Mean-Att2 (N)\t"
+            "Imp-Att2 (N*s)\t"
+            "Mean-Cont2 (N)\t"
+            "Imp-Cont2 (N*s)\t"
+            "Amortization2 (N)\n")
+
+        # Results:
+        with open(output_file_path, "w") as output_file:
+            output_file.write(header)
+            results = [input_file_name] + list(map(lambda x: round(x, decimals) if isinstance(x, (int, float)) else x, [
+                weight,
+                mass,
+                "",
+                di_h,
+                im_di_h,
+                im_h,
+                ft_h,
+                land_depth,
+                "",
+                mean_prop_fz,
+                peak_prop_fz,
+                prop_imp_ns,
+                mean_prop_pwr_w,
+                peak_pwr_w,
+                peak_vel_prop,
+                mean_sj1_fz,
+                sj1_imp_ns,
+                mean_sj1_pwr_w,
+                mean_sj2_fz,
+                sj2_imp_ns,
+                mean_sj2_pwr_w,
+                peak_rfd,
+                peak_pwr_vel,
+                peak_pwr_fz,
+                "",
+                mean_load_fz,
+                peak_load_fz,
+                load_imp_ns,
+                load_rfd,
+                mean_att_fz,
+                att_imp_ns,
+                att_rfd,
+                mean_cont_fz,
+                cont_imp_ns,
+                cont_rfd,
+                amortization,
+                "",
+                prop_time,
+                flight_time,
+                load_time,
+                att_time,
+                cont_time,
+                time_to_pf,
+                time_to_pp,
+                time_to_pv,
+                time_to_to,
+                "",
+                mean_prop_fz1,
+                peak_fz1,
+                prop_imp_fz1,
+                mean_sj1_fz1,
+                mean_sj2_fz1,
+                mean_load_fz1,
+                peak_load_fz1,
+                load_imp_fz1,
+                mean_att_fz1,
+                att_imp_fz1,
+                mean_cont_fz1,
+                cont_imp_fz1,
+                amortization1,
+                "",
+                mean_prop_fz2,
+                peak_fz2,
+                prop_imp_fz2,
+                mean_sj1_fz2,
+                mean_sj2_fz2,
+                mean_load_fz2,
+                peak_load_fz2,
+                load_imp_fz2,
+                mean_att_fz2,
+                att_imp_fz2,
+                mean_cont_fz2,
+                cont_imp_fz2,
+                amortization2]))
+            output_file.write("\t".join(map(str, results)))
+            output_file.write("\n")
+            messagebox.showinfo(" ", "Analysis complete!")  # Displays the end-message
+            sys.exit(0)  # Exits the script
+
+
+def create_button(window, text, command):
+    tk.Button(window, text=text, command=lambda: [window.destroy(), command()], width=15).pack(pady=5)
+
+
+def main(screen_width, screen_height):  # noqa
+    window = tk.Tk()
+    window.title(" ")
+    window.resizable(False, False)
+    label_frame = tk.Frame(window)
+    label_frame.pack(pady=10)
+    tk.Label(label_frame, text="Dual-FP system", font=('TkDefaultFont', 10, 'bold')).pack()
+    tk.Label(label_frame, text="Type of jump to analyze:", font=('TkDefaultFont', 10)).pack()
+
+    create_button(window, "CMJ", cmj)
+    create_button(window, "DJ", dj)
+    create_button(window, "SJ", sj)
+    width, height = 200, 200
+    x = (screen_width // 2) - (width // 2)
+    y = (screen_height // 2) - (height // 2)
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    window.mainloop()
+
+
+if __name__ == "__main__":
+    screen_width, screen_height, window_width, window_height, x_pos, y_pos = setup_window()
+    main(screen_width, screen_height)
