@@ -33,23 +33,23 @@ date: 21 September 2025
 bibliography: paper.bib
 ---
 
-# 1. Summary
+# Summary
 
 This paper presents an open-access Python script with user-friendly executable files designed to operate independently of any integrated development environment. The script aims to reduce financial barriers and facilitate the analysis of ground reaction forces for the most common vertical jump (VJ) types in the scientific literature (i.e., countermovement jump, squat jump, and drop jump) using single or dual force platform systems.
 
-# 2. Statement of need
+# Statement of need
 
 VJs performed on force platforms yield a range of metrics for assessing the lower limbs’ function [@Bishop:2023] and the kinetic data obtained can be used to estimate kinematic metrics by tracking participant’s center of mass displacement (CoM-D). The derived metrics allow for the investigation of strategies to improve performance [@Krzyszkowski:2022; @McLellan:2011] and to identify injury risk [@Jordan:2015; @Pedley:2020]. However, uncertainty may arise in the analytical approach, particularly due to the heterogeneity in the definitions of VJ phases [@Harry:2020; @McMahon:2018; @VanHooren:2017] and the appropriate calculation of the metrics [@Bishop:2023; @Bishop:2022].
 
 Different options are available for calculating VJ metrics, including analysis in Excel [@Chavda:2018; @Delgado-García:2025], MATLAB [@Harry:2021; @Merrigan:2022], and Python [@Smith:2024]. Notably, the study by [@Merrigan:2022] provided scripts to analyze the countermovement jump (CMJ), drop jump (DJ), and squat jump (SJ). However, because the scripts are written in MATLAB, purchasing the software may be a financial barrier. Additionally, bilateral asymmetry analysis performed on dual force platform systems are not supported. These limitations were mitigated by [@Delgado-García:2025], who provided an open-access method that include asymmetry analysis, but only for CMJ. Furthermore, none of the previous studies included metrics related to the landing phases of these VJs.
 
-# 3. Data Processing Methods
+# Data Processing Methods
 
-### 3.1 Time List and Weighing
+### Time List and Weighing
 
 The time is calculated based on the sampling frequency. During the vertical ground rection force (Fz; in Newtons) data processing, each row is counted from top to bottom and divided by the inserted sampling frequency, thereby resulting in the time list (seconds). Afterwards, the participant’s weight (N) is calculated. The initial second of the Fz-data is used as a reference for the CMJ, while the final second is employed for both the DJ and SJ. The mean Fz during these one-second intervals is considered the participant’s weight [@Chavda:2018; @McMahon:2018; @Owen:2014]. Therefore, it is important to instruct the participant to remain stable for at least one second prior to the CMJ initiation and one second post DJ and SJ landing [@Wank:2019].
 
-### 3.2 Integration Methods
+### Integration Methods
 
 In contrast to the CMJ, where the conditions are ideal for initiating the integrations relative to the standing position (i.e., the CoM vertical position is 0 m, and the velocity is 0 m·s⁻¹), the DJ and SJ do not initiate under these conditions. These conditions are satisfied at the end of the jump, once the subject returns to and remains in the standing position. As a result, the weighing phase is performed at the end of both DJ and SJ. Therefore, for the CMJ the traditional integration method was employed, while the backward integration method was utilized for the DJ and SJ [@Grozier:2021; @Wade:2022; @Wank:2019].
 
@@ -79,7 +79,7 @@ $$
 
 *6ᵗʰ step:* Fz-list values are multiplied by the velocity at each time point, resulting in the power list (W).
 
-### 3.3 Jump Start, Takeoff and Landing Detections
+### Jump Start, Takeoff and Landing Detections
 
 The method proposed by [@Owen:2014] was used to establish the CMJ- and SJ-start. The Fz standard deviation (SD) was calculated during the weighing phase, and the start was defined as an alteration in participant’s weight ± 5 SD. In the DJ, an Fz value > 20 N was initially defined as the start [@Harry et al., 2020].
 
@@ -87,7 +87,7 @@ Analogous to DJ-start detection, the takeoff was delineated as the initial point
 
 Following the delineation of the takeoff-landing, all the Fz values within this interval were set to zero to mitigate integration drifts [@Eythorsdottir:2024].
 
-### 3.4 Jump Phases Definition
+### Jump Phases Definition
 
 The phases preceding CMJ takeoff were defined based on the approach delineated by [@Harry:2020], while the terminology was adapted to “upward” and “downward” rather than “concentric” and “eccentric” [@VanHooren:2017]. The DJ-phases were adapted based on the study by [@Harry:2020], removing the unloading and yielding from the downward phase. The SJ-propulsion was divided into two phases according to the study by [@Jordan:2015]. Phase 1 refers to the interval between SJ-start and half of total propulsion-phase, and Phase 2 refers to half of total propulsion-phase and takeoff interval. The entire SJ-propulsion was also considered as a single phase [@Jordan:2015]. The landing phases were defined in a standard manner for all VJs, as outlined in the study by [@Harry:2022b].
 
@@ -95,19 +95,19 @@ Figure 1 illustrates the VJ phases obtained from the script (from dual force pla
 
 ![Countermovement jump (CMJ), drop jump (DJ), and squat jump (SJ) analysis illustrations. Force platform (FP); Vertical ground reaction force (Fz).\label{fig:figure1.png}](figure1.png)
 
-### 3.5 Individual Metrics for Asymmetry Calculation
+### Individual Metrics for Asymmetry Calculation
 
 To calculate the asymmetries in dual force platform systems, the phases were first defined based on the total Fz; the sum of both force platforms with simultaneous phase detection for both limbs [@Janicijevic:2022]. In the impulse calculations, the net-Fz-list was derived based on half of the participant’s weight [@Benjanuvatra:2013]. The data across the VJ-phases (mean and peak Fz; and impulse) are presented individually for each force platform, allowing for different approaches to calculating asymmetries.
 
-# 4. Availability
+# Availability
 
 The code is available on [Zenodo](https://doi.org/10.5281/zenodo.17167260). The tool is distributed under the MIT License, allowing for free use, modification, and redistribution. Instructions for usage are provided in the README file.
 
-# 5. Acknowledgements
+# Acknowledgements
 
 The author LGM would like to thank CNPq – Conselho Nacional de Desenvolvimento Científico e Tecnológico for the scholarship, as well as Felipe Gidiel-Machado and Germano Buzzato de Souza for helping in the development of the scripts presented in this study through their discussions.
 
-# 6. Supplementary Materials
+# Supplementary Materials
 More detailed information about the definition of each jump phase and the references used for the calculation of each metric are available on [GitHub](https://github.com/gidiel-machado/Vertical-Jumps-Fz-Automated-Analysis) (suptables).
 
-# 7. References
+# References
